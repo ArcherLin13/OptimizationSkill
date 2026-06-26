@@ -16,3 +16,7 @@ desktop.ini
 seamless_clone_bench/build/
 seamless_clone_bench/third_party/
 seamless_clone_bench/*.zip
+
+# local secrets (never push)
+.secrets/
+.github_token
