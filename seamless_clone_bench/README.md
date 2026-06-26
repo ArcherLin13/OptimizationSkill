@@ -20,6 +20,16 @@
 2. 手机开启开发者模式，USB 连接，`hdc list targets` 能看到设备
 3. 需要先用脚本交叉编译 **OpenCV**（仅 core/imgproc/photo）
 
+## 预编译可执行文件（OHOS arm64）
+
+若不想本地编译，可直接使用仓库内预编译二进制：
+
+```text
+bin/arm64-v8a/seamless_clone_bench
+```
+
+推送到手机时仍需本机 OpenCV `.so` 与 `libc++_shared.so`（见 `deploy.ps1`），**预编译包不含 OpenCV 库**。
+
 ## 构建步骤（Windows PowerShell）
 
 ```powershell

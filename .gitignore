@@ -16,6 +16,8 @@ desktop.ini
 seamless_clone_bench/build/
 seamless_clone_bench/third_party/
 seamless_clone_bench/*.zip
+# keep prebuilt OHOS binary only under bin/
+seamless_clone_bench/bin/**/*.so
 
 # local secrets (never push)
 .secrets/

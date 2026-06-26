@@ -1,5 +1,6 @@
 build/
 third_party/
+bin/**/*.so
 *.ninja
 *.o
 *.so
