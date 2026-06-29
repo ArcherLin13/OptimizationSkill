@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 
 class ScopedTimer {
@@ -25,6 +26,12 @@ struct TimingStats {
 };
 
 template <typename Fn>
+inline void timeOnce(Fn&& fn, double& outMs) {
+    ScopedTimer timer(outMs);
+    fn();
+}
+
+template <typename Fn>
 inline TimingStats measureMs(int warmup, int runs, Fn&& fn) {
     for (int i = 0; i < warmup; ++i) {
         fn();
@@ -37,10 +44,7 @@ inline TimingStats measureMs(int warmup, int runs, Fn&& fn) {
 
     for (int i = 0; i < runs; ++i) {
         double ms = 0.0;
-        {
-            ScopedTimer timer(ms);
-            fn();
-        }
+        timeOnce(fn, ms);
         total += ms;
         stats.minMs = std::min(stats.minMs, ms);
         stats.maxMs = std::max(stats.maxMs, ms);

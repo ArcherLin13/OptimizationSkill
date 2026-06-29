@@ -41,6 +41,15 @@ void printCompare(const char* label, const CompareResult& cmp, const char* note)
             << " => " << (cmp.pass ? "PASS" : "FAIL") << " (" << note << ")\n";
 }
 
+using BaselineFn = void (*)(const BenchCase&, cv::Mat&);
+
+void timeBaselineCall(const char* label, const BenchCase& bench, BaselineFn fn) {
+  double ms = 0.0;
+  cv::Mat out;
+  timeOnce([&]() { fn(bench, out); }, ms);
+  std::cout << std::fixed << std::setprecision(2) << label << ": " << ms << " ms\n";
+}
+
 }  // namespace
 
 int runBenchmark() {
@@ -54,6 +63,41 @@ int runBenchmark() {
             << bench.center.x << "," << bench.center.y << ")"
             << " solver_px=" << (bench.src.cols * bench.src.rows) << "\n";
 
+  std::cout << "--- cold / warmup (baseline only) ---\n";
+  std::cout << "compare cold_first with your app's first seamlessClone call\n";
+  timeBaselineCall("cold_first", bench, runBaselineClone);
+
+  const auto baselineOnce = [&](cv::Mat& tmp) { runBaselineClone(bench, tmp); };
+
+  std::cout << "--- timing (5 runs, NO warmup; 1 prior call = cold_first) ---\n";
+  const TimingStats baselineNoWarm =
+      measureMs(0, 5, [&]() {
+        cv::Mat tmp;
+        baselineOnce(tmp);
+      });
+  printStats("baseline", baselineNoWarm);
+
+  double warmupTotal = 0.0;
+  constexpr int kWarmupRuns = 2;
+  for (int i = 0; i < kWarmupRuns; ++i) {
+    double ms = 0.0;
+    cv::Mat out;
+    timeOnce([&]() { runBaselineClone(bench, out); }, ms);
+    warmupTotal += ms;
+    std::cout << std::fixed << std::setprecision(2) << "warmup[" << (i + 1) << "]: " << ms
+              << " ms\n";
+  }
+  std::cout << std::fixed << std::setprecision(2) << "warmup_total: " << warmupTotal << " ms\n";
+
+  std::cout << "--- timing (5 runs after 2 warmup above) ---\n";
+  const TimingStats baselineWarm =
+      measureMs(0, 5, [&]() {
+        cv::Mat tmp;
+        baselineOnce(tmp);
+      });
+  printStats("baseline", baselineWarm);
+
+  std::cout << "--- correctness (after timing) ---\n";
   cv::Mat baselineOut;
   runBaselineClone(bench, baselineOut);
 
@@ -79,38 +123,29 @@ int runBenchmark() {
   printCompare("aligned_736x128", alignedCmp, "FFT-friendly pad, near-identical");
   printCompare("half_res", halfCmp, "approximate fast path");
 
-  const TimingStats baselineStats =
-      measureMs(2, 5, [&]() {
-        cv::Mat tmp;
-        runBaselineClone(bench, tmp);
-      });
-
+  std::cout << "--- timing other paths (2 warmup + 5 runs) ---\n";
   const TimingStats pooledStats =
-      measureMs(2, 5, [&]() {
+      measureMs(kWarmupRuns, 5, [&]() {
         cv::Mat tmp;
         runPooledClone(ctx, bench, tmp);
       });
-
   const TimingStats alignedStats =
-      measureMs(2, 5, [&]() {
+      measureMs(kWarmupRuns, 5, [&]() {
         cv::Mat tmp;
         runAlignedClone(bench, tmp, 32);
       });
-
   const TimingStats halfStats =
-      measureMs(2, 5, [&]() {
+      measureMs(kWarmupRuns, 5, [&]() {
         cv::Mat tmp;
         runHalfResClone(bench, tmp);
       });
 
-  std::cout << "--- timing (5 runs after 2 warmup) ---\n";
-  printStats("baseline", baselineStats);
   printStats("pooled_reuse", pooledStats);
   printStats("aligned_736x128", alignedStats);
   printStats("half_res", halfStats);
 
-  const double speedupAligned = baselineStats.avgMs / std::max(alignedStats.avgMs, 1e-6);
-  const double speedupHalf = baselineStats.avgMs / std::max(halfStats.avgMs, 1e-6);
+  const double speedupAligned = baselineWarm.avgMs / std::max(alignedStats.avgMs, 1e-6);
+  const double speedupHalf = baselineWarm.avgMs / std::max(halfStats.avgMs, 1e-6);
   std::cout << "speedup aligned: " << speedupAligned << "x\n";
   std::cout << "speedup half_res: " << speedupHalf << "x\n";
 
