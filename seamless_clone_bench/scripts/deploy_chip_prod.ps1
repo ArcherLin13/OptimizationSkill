@@ -1,6 +1,6 @@
 # Deploy benchmark using OpenCV already on device (/chip_prod/lib64).
 param(
-    [string]$OhosNative = "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native",
+    [string]$OhosNative = "",
     [string]$ExePath = "",
     [string]$RemoteDir = "/data/local/tmp/seamless_clone_bench",
     [string]$DeviceLibDir = "/chip_prod/lib64"
@@ -8,6 +8,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
+
+$cfg = & (Join-Path $PSScriptRoot "load_config.ps1") @{
+    OhosNative = $OhosNative
+    DeviceLibDir = $DeviceLibDir
+}
+$OhosNative = if ($cfg.OhosNative) { $cfg.OhosNative } else {
+    "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"
+}
+if ($cfg.DeviceLibDir) { $DeviceLibDir = $cfg.DeviceLibDir }
+
 $Hdc = Join-Path (Split-Path $OhosNative -Parent) "toolchains\hdc.exe"
 
 if ([string]::IsNullOrWhiteSpace($ExePath)) {

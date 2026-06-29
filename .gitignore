@@ -19,6 +19,7 @@ seamless_clone_bench/*.zip
 # keep prebuilt OHOS binary only under bin/
 seamless_clone_bench/bin/**/*.so
 seamless_clone_bench/device_libs/
+seamless_clone_bench/scripts/config.local.ps1
 
 # local secrets (never push)
 .secrets/

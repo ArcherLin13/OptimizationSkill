@@ -1,6 +1,6 @@
 # Build seamless_clone_bench for HarmonyOS arm64-v8a.
 param(
-    [string]$OhosNative = "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native",
+    [string]$OhosNative = "",
     [string]$OpenCvRoot = "",
     [switch]$UseBundledOpenCV,
     [string]$OpenCvOhosDir = "",
@@ -10,6 +10,15 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $Root "build\ohos-arm64"
+
+$cfg = & (Join-Path $PSScriptRoot "load_config.ps1") @{
+    OhosNative = $OhosNative
+    OpenCvRoot = $OpenCvRoot
+}
+$OhosNative = if ($cfg.OhosNative) { $cfg.OhosNative } else {
+    "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"
+}
+$OpenCvRoot = $cfg.OpenCvRoot
 
 if ([string]::IsNullOrWhiteSpace($OpenCvRoot)) {
     $OpenCvRoot = Join-Path $Root "opencv"

@@ -30,6 +30,48 @@ bin/arm64-v8a/seamless_clone_bench
 
 推送到手机时仍需本机 OpenCV `.so` 与 `libc++_shared.so`（见 `deploy.ps1`），**预编译包不含 OpenCV 库**。
 
+## 另一台电脑：配置 DevEco 工具链路径
+
+DevEco 装在不同盘符/目录时，任选一种方式：
+
+### 方式 1：本地配置文件（推荐）
+
+```powershell
+copy scripts\config.local.ps1.example scripts\config.local.ps1
+notepad scripts\config.local.ps1
+```
+
+修改 `$OHOS_NATIVE` 为你的 `openharmony\native` 目录，例如：
+
+```powershell
+$OHOS_NATIVE = "D:\Huawei\DevEco Studio\sdk\default\openharmony\native"
+```
+
+`config.local.ps1` 不会提交到 Git。
+
+### 方式 2：命令行参数
+
+```powershell
+.\scripts\build.ps1 -OhosNative "D:\你的路径\openharmony\native"
+.\scripts\deploy_chip_prod.ps1 -OhosNative "D:\你的路径\openharmony\native"
+```
+
+### 方式 3：环境变量
+
+```powershell
+$env:OHOS_NATIVE = "D:\你的路径\openharmony\native"
+.\scripts\build.ps1
+```
+
+`$OHOS_NATIVE` 必须能访问到：
+
+```text
+build\cmake\ohos.toolchain.cmake
+build-tools\cmake\bin\cmake.exe
+llvm\bin\clang++.exe
+..\toolchains\hdc.exe
+```
+
 ## 用本机 OpenCV（推荐，匹配 /chip_prod/lib64）
 
 从手机拷贝 4 个 so 到 `opencv/`：
