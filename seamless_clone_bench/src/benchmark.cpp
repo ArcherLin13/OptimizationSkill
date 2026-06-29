@@ -30,6 +30,55 @@ BenchCase makeUserCase() {
   return bench;
 }
 
+BenchCase makeDenseMaskCase() {
+  BenchCase bench = makeUserCase();
+  bench.mask.setTo(255);
+  return bench;
+}
+
+void printOutInfo(const char* label, const cv::Mat& out, int maskFg) {
+  std::cout << label << ": " << out.cols << "x" << out.rows << " type=" << out.type()
+            << " continuous="
+            << (out.empty() ? -1 : (out.step == (size_t)out.cols * out.elemSize()))
+            << " (mask fg=" << maskFg << ")\n";
+}
+
+void runAllocExperiment(const char* tag, const BenchCase& bench) {
+  const int maskFg = cv::countNonZero(bench.mask);
+  std::cout << "--- output alloc experiment: " << tag
+            << " (mask fg=" << maskFg << ") ---\n";
+
+  cv::Mat show;
+  printOutInfo("before_clone", show, maskFg);
+
+  double coldEmptyMs = 0.0;
+  cv::Mat coldOut;
+  timeOnce([&]() { runBaselineClone(bench, coldOut); }, coldEmptyMs);
+  printOutInfo("after_empty_out", coldOut, maskFg);
+  std::cout << std::fixed << std::setprecision(2) << "cold_empty_out: " << coldEmptyMs
+            << " ms\n";
+
+  cv::Mat prealloc;
+  prealloc.create(bench.dst.rows, bench.dst.cols, CV_8UC3);
+  printOutInfo("prealloc_before", prealloc, maskFg);
+
+  double coldPreallocMs = 0.0;
+  timeOnce([&]() { runBaselineClone(bench, prealloc); }, coldPreallocMs);
+  std::cout << std::fixed << std::setprecision(2) << "cold_prealloc_out: " << coldPreallocMs
+            << " ms\n";
+
+  const TimingStats emptyStats = measureMs(0, 5, [&]() {
+    cv::Mat out;
+    runBaselineClone(bench, out);
+  });
+  printStats("empty_out_each_call", emptyStats);
+
+  const TimingStats preallocStats = measureMs(0, 5, [&]() {
+    runBaselineClone(bench, prealloc);
+  });
+  printStats("reuse_prealloc_out", preallocStats);
+}
+
 void printStats(const char* label, const TimingStats& stats) {
   std::cout << std::fixed << std::setprecision(2);
   std::cout << label << ": avg=" << stats.avgMs << "ms min=" << stats.minMs
@@ -61,7 +110,13 @@ int runBenchmark() {
             << " dst=" << bench.dst.cols << "x" << bench.dst.rows
             << " mask=" << bench.mask.cols << "x" << bench.mask.rows << " center=("
             << bench.center.x << "," << bench.center.y << ")"
-            << " solver_px=" << (bench.src.cols * bench.src.rows) << "\n";
+            << " solver_px=" << (bench.src.cols * bench.src.rows)
+            << " mask_fg=" << cv::countNonZero(bench.mask) << "\n";
+
+  runAllocExperiment("ellipse_mask", bench);
+  const BenchCase denseBench = makeDenseMaskCase();
+  std::cout << "dense_mask_fg=" << cv::countNonZero(denseBench.mask) << " (app-like)\n";
+  runAllocExperiment("dense_mask_91pct", denseBench);
 
   std::cout << "--- cold / warmup (baseline only) ---\n";
   std::cout << "compare cold_first with your app's first seamlessClone call\n";
