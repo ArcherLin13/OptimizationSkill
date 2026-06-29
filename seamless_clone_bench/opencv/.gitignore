@@ -1,0 +1,6 @@
+# Device OpenCV shared libraries from phone — do not commit.
+lib/
+lib64/
+libopencv_*.so*
+
+# Headers under include/ are committed (minimal OpenCV 4.9 API headers).

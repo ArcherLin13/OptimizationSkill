@@ -30,6 +30,28 @@ bin/arm64-v8a/seamless_clone_bench
 
 推送到手机时仍需本机 OpenCV `.so` 与 `libc++_shared.so`（见 `deploy.ps1`），**预编译包不含 OpenCV 库**。
 
+## 用本机 OpenCV（推荐，匹配 /chip_prod/lib64）
+
+从手机拷贝 4 个 so 到 `opencv/`：
+
+- `libopencv_core.so*`
+- `libopencv_imgcodecs.so*`
+- `libopencv_imgproc.so*`
+- `libopencv_photo.so*`
+
+头文件放到 `opencv/include/opencv4/`（版本需与 so 一致）。
+
+```powershell
+.\scripts\build.ps1
+.\scripts\deploy_chip_prod.ps1
+```
+
+默认 **不再** 需要 `build_opencv.ps1`。若要用自编的 OpenCV 4.9：
+
+```powershell
+.\scripts\build.ps1 -UseBundledOpenCV
+```
+
 ## 构建步骤（Windows PowerShell）
 
 ```powershell
