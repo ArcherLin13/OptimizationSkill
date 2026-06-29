@@ -43,6 +43,12 @@ void printOutInfo(const char* label, const cv::Mat& out, int maskFg) {
             << " (mask fg=" << maskFg << ")\n";
 }
 
+void printStats(const char* label, const TimingStats& stats) {
+  std::cout << std::fixed << std::setprecision(2);
+  std::cout << label << ": avg=" << stats.avgMs << "ms min=" << stats.minMs
+            << "ms max=" << stats.maxMs << "ms\n";
+}
+
 void runAllocExperiment(const char* tag, const BenchCase& bench) {
   const int maskFg = cv::countNonZero(bench.mask);
   std::cout << "--- output alloc experiment: " << tag
@@ -77,12 +83,6 @@ void runAllocExperiment(const char* tag, const BenchCase& bench) {
     runBaselineClone(bench, prealloc);
   });
   printStats("reuse_prealloc_out", preallocStats);
-}
-
-void printStats(const char* label, const TimingStats& stats) {
-  std::cout << std::fixed << std::setprecision(2);
-  std::cout << label << ": avg=" << stats.avgMs << "ms min=" << stats.minMs
-            << "ms max=" << stats.maxMs << "ms\n";
 }
 
 void printCompare(const char* label, const CompareResult& cmp, const char* note) {

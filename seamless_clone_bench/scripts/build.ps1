@@ -18,11 +18,7 @@ $cfg = & (Join-Path $PSScriptRoot "load_config.ps1") @{
 $OhosNative = if ($cfg.OhosNative) { $cfg.OhosNative } else {
     "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"
 }
-$OpenCvRoot = $cfg.OpenCvRoot
-
-if ([string]::IsNullOrWhiteSpace($OpenCvRoot)) {
-    $OpenCvRoot = Join-Path $Root "opencv"
-}
+$OpenCvRoot = if ($cfg.OpenCvRoot) { $cfg.OpenCvRoot } else { Join-Path $Root "opencv" }
 
 $Toolchain = Join-Path $OhosNative "build\cmake\ohos.toolchain.cmake"
 $Cmake = Join-Path $OhosNative "build-tools\cmake\bin\cmake.exe"
@@ -60,13 +56,26 @@ if ($UseBundledOpenCV) {
             Select-Object -First 1
     }
     if (-not $coreLib) {
-        Write-Host "ERROR: put device OpenCV libs under: $OpenCvRoot"
-        Write-Host "Expected: libopencv_core/imgcodecs/imgproc/photo.so*"
-        Write-Host "And headers under: $OpenCvRoot\include (opencv4/)"
-        exit 1
+        $bundled = Join-Path $Root "third_party\opencv-ohos-arm64"
+        $bundledCore = Get-ChildItem (Join-Path $bundled "lib") -Filter "libopencv_core.so*" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($bundledCore -and (Test-Path (Join-Path $OpenCvRoot "include\opencv4"))) {
+            Write-Host "WARN: no .so in $OpenCvRoot ; using third_party libs + opencv/include headers"
+            $cmakeArgs += "-DUSE_DEVICE_OPENCV=OFF"
+            $cmakeArgs += "-DOpenCV_DIR=$bundled\lib\cmake\opencv4"
+            $inc = (Join-Path $OpenCvRoot "include\opencv4") -replace '\\', '/'
+            $cmakeArgs += "-DCMAKE_CXX_FLAGS=-isystem$inc"
+        } else {
+            Write-Host "ERROR: put device OpenCV libs under: $OpenCvRoot"
+            Write-Host "Expected: libopencv_core/imgcodecs/imgproc/photo.so*"
+            Write-Host "And headers under: $OpenCvRoot\include (opencv4/)"
+            Write-Host "Or: .\scripts\build.ps1 -UseBundledOpenCV"
+            exit 1
+        }
+    } else {
+        $cmakeArgs += "-DUSE_DEVICE_OPENCV=ON"
+        $cmakeArgs += "-DOPENCV_DEVICE_DIR=$OpenCvRoot"
     }
-    $cmakeArgs += "-DUSE_DEVICE_OPENCV=ON"
-    $cmakeArgs += "-DOPENCV_ROOT=$OpenCvRoot"
 }
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
