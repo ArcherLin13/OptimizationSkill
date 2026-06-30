@@ -20,7 +20,6 @@ add_executable(seamless_clone_bench
   src/poisson_fft.cpp
   lib/seamless_clone_jacobi/seamless_clone_jacobi.cpp
   lib/seamless_clone_fft/seamless_clone_fft.cpp
-  lib/seamless_clone_fft/sc_fft_rows.cpp
   src/visual_export.cpp
 )
 

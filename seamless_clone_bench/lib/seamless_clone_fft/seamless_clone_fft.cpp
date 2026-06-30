@@ -1,6 +1,5 @@
-// OpenCV 4.9 NORMAL_CLONE + buffer reuse + pocketfft + 3-channel parallel.
+// OpenCV 4.9 NORMAL_CLONE + buffer reuse + 3-channel parallel (cv::dft merge path).
 #include "seamless_clone_fft.h"
-#include "sc_fft_rows.h"
 
 #include <opencv2/core/utility.hpp>
 #include <opencv2/imgproc.hpp>
@@ -9,7 +8,6 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
@@ -107,39 +105,6 @@ static void neonClampU8Row(uchar* dst, const float* interp, int wInner) {
 
 #endif
 
-#ifdef SC_FFT_NEON
-static void fillComplexFromReal(const cv::Mat& real, cv::Mat& cpx) {
-    CV_Assert(real.rows == cpx.rows && real.cols == cpx.cols);
-    for (int j = 0; j < real.rows; ++j) {
-        const float* r = real.ptr<float>(j);
-        float* c = cpx.ptr<float>(j);
-        int i = 0;
-        for (; i + 4 <= real.cols; i += 4) {
-            const float32x4_t vr = vld1q_f32(r + i);
-            const float32x4x2_t z = vzipq_f32(vr, vdupq_n_f32(0.f));
-            vst1q_f32(c + 2 * i, z.val[0]);
-            vst1q_f32(c + 2 * i + 4, z.val[1]);
-        }
-        for (; i < real.cols; ++i) {
-            c[2 * i] = r[i];
-            c[2 * i + 1] = 0.f;
-        }
-    }
-}
-#else
-static void fillComplexFromReal(const cv::Mat& real, cv::Mat& cpx) {
-    CV_Assert(real.rows == cpx.rows && real.cols == cpx.cols);
-    for (int j = 0; j < real.rows; ++j) {
-        const float* r = real.ptr<float>(j);
-        float* c = cpx.ptr<float>(j);
-        for (int i = 0; i < real.cols; ++i) {
-            c[2 * i] = r[i];
-            c[2 * i + 1] = 0.f;
-        }
-    }
-}
-#endif
-
 struct EigenFilters {
     std::vector<float> x;
     std::vector<float> y;
@@ -165,19 +130,24 @@ struct DstScratch {
     cv::Mat tempB;
     cv::Mat complexA;
     cv::Mat complexB;
+    cv::Mat planeA1;
+    cv::Mat planeB1;
 
     void dstTransform(const cv::Mat& src, cv::Mat& dest, bool invert) {
+        const int flag = invert ? cv::DFT_ROWS + cv::DFT_SCALE + cv::DFT_INVERSE : cv::DFT_ROWS;
         const int rows = src.rows;
         const int cols = src.cols;
 
         const cv::Size sizeA(2 * cols + 2, rows);
         if (tempA.size() != sizeA) {
             tempA.create(rows, 2 * cols + 2, CV_32F);
+            planeA1.create(rows, 2 * cols + 2, CV_32F);
             complexA.create(sizeA, CV_32FC2);
         }
         const cv::Size sizeB(2 * rows + 2, cols);
         if (tempB.size() != sizeB) {
             tempB.create(cols, 2 * rows + 2, CV_32F);
+            planeB1.create(sizeB, CV_32F);
             complexB.create(sizeB, CV_32FC2);
         }
 
@@ -188,28 +158,30 @@ struct DstScratch {
             neonFlipNegateRow(src.ptr<float>(j), tempA.ptr<float>(j), cols);
         }
 
-        fillComplexFromReal(tempA, complexA);
-        sc_fft::dftRows32fc2(complexA, invert);
+        planeA1.setTo(0);
+        cv::Mat planesA[] = {tempA, planeA1};
+        cv::merge(planesA, 2, complexA);
+        cv::dft(complexA, complexA, flag);
+        cv::split(complexA, planesA);
 
         tempB.setTo(0);
         for (int j = 0; j < cols; ++j) {
             float* tempLinePtr = tempB.ptr<float>(j);
             for (int i = 0; i < rows; ++i) {
-                const float val = complexA.ptr<float>(i)[2 * (j + 1) + 1];
+                const float val = planesA[1].ptr<float>(i)[j + 1];
                 tempLinePtr[i + 1] = val;
                 tempLinePtr[tempB.cols - 1 - i] = -val;
             }
         }
 
-        fillComplexFromReal(tempB, complexB);
-        sc_fft::dftRows32fc2(complexB, invert);
+        planeB1.setTo(0);
+        cv::Mat planesB[] = {tempB, planeB1};
+        cv::merge(planesB, 2, complexB);
+        cv::dft(complexB, complexB, flag);
+        cv::split(complexB, planesB);
 
-        for (int j = 0; j < rows; ++j) {
-            float* destRow = dest.ptr<float>(j);
-            for (int i = 0; i < cols; ++i) {
-                destRow[i] = complexB.ptr<float>(i)[2 * (j + 1) + 1];
-            }
-        }
+        cv::Mat transposed = planesB[1].t();
+        transposed(cv::Rect(0, 1, cols, rows)).copyTo(dest);
     }
 };
 
@@ -411,16 +383,13 @@ private:
         const int perChannelThreads = std::max(1, savedThreads / 3);
         cv::setNumThreads(perChannelThreads);
 
-        std::thread workers[3];
-        for (int chan = 0; chan < 3; ++chan) {
-            workers[chan] = std::thread([this, chan]() {
+        cv::parallel_for_(cv::Range(0, 3), [&](const cv::Range& range) {
+            for (int chan = range.start; chan < range.end; ++chan) {
                 poissonSolver(ws_.output[chan], ws_.rgbxChannel[chan], ws_.rgbyChannel[chan],
                               ws_.output[chan], ws_.channel[chan]);
-            });
-        }
-        for (auto& w : workers) {
-            w.join();
-        }
+            }
+        });
+
         cv::setNumThreads(savedThreads);
     }
 

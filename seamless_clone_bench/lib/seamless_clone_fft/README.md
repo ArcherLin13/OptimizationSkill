@@ -1,10 +1,10 @@
 # seamless_clone_fft
 
-OpenCV 4.9 `NORMAL_CLONE` reimplementation (DST/DFT). Verified `maxDiff=0` vs `cv::seamlessClone`.
+OpenCV 4.9 `NORMAL_CLONE` reimplementation. Verified `maxDiff=0`, ~100ms on device (vs ~185ms baseline).
 
-**Stable release:** git tag `seamless-fft-100ms-pass` (~100ms on device, maxDiff=0).
+**Stable tag:** `seamless-fft-100ms-pass` (points at this DST merge + 3-channel path)
 
-## Production usage
+## Usage
 
 ```cpp
 #include "seamless_clone_fft.h"
@@ -13,17 +13,16 @@ seamless_clone_fft::Context ctx;
 ctx.seamlessClone(src, dst, mask, center, output);
 ```
 
-## Optimizations (verified)
+## What makes ~100ms
 
-- Reused ROI / gradient / DST buffers (`Context`)
-- **3 RGB channels** solved in parallel (private DST scratch each)
-- `cv::setNumThreads(n/3)` per channel
-- DST path avoids merge/split; ARM NEON for prep / eigen / clamp
-- Row FFT uses **`cv::dft`** (required for maxDiff=0; ported FFT/NEON failed on device)
+1. **`cv::merge` + `cv::dft` + `cv::split`** DST path (faster than manual complex fill on device)
+2. **`cv::parallel_for_` over 3 RGB channels** with `cv::setNumThreads(n/3)` per channel
+3. Context buffer reuse + NEON prep/eigen/clamp
+
+Do **not** replace `cv::dft` with third-party FFT (breaks maxDiff=0).
 
 ## Files
 
 - `seamless_clone_fft.h` / `seamless_clone_fft.cpp`
-- `sc_fft_rows.h` / `sc_fft_rows.cpp`
 
 Link OpenCV **core + imgproc** only.
