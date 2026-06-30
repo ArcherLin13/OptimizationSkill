@@ -107,10 +107,7 @@ int runBenchmark(const BenchCase& bench) {
                          "rect mask, default OpenCV path"});
     variants.push_back({"poisson_fft", VariantKind::Identical,
                         [&](cv::Mat& out) { runFftPoissonClone(bench, out); }, 100.0, 0.0,
-                        "FFT clone, pooled Context + parallel channels"});
-    variants.push_back({"poisson_fft_skip", VariantKind::Identical,
-                        [&](cv::Mat& out) { runFftPoissonCloneSkipUnchanged(bench, out); }, 100.0, 0.0,
-                        "skip when src/dst/mask unchanged (2nd+ frame hit)"});
+                        "FFT clone, Context buffer reuse + NEON CPU loops"});
     variants.push_back(
         {"prealloc_out", VariantKind::Identical,
          [&](cv::Mat& out) {

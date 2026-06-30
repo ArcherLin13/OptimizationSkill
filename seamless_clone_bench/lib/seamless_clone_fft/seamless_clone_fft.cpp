@@ -1,6 +1,7 @@
-// OpenCV 4.9 NORMAL_CLONE + Phase B buffer reuse / parallel channels.
+// OpenCV 4.9 NORMAL_CLONE + buffer reuse + ARM NEON for CPU loops.
 #include "seamless_clone_fft.h"
 
+#include <opencv2/core/utility.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include <cmath>
@@ -9,9 +10,100 @@
 #include <stdexcept>
 #include <vector>
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#define SC_FFT_NEON 1
+#endif
+
 namespace {
 
 constexpr int kNormalClone = 1;
+
+#ifdef SC_FFT_NEON
+
+static void neonFlipNegateRow(const float* src, float* dstExt, int cols) {
+    int i = 0;
+    for (; i + 4 <= cols; i += 4) {
+        const int base = cols - 4 - i;
+        float32x4_t v = vld1q_f32(src + base);
+        v = vrev64q_f32(v);
+        v = vcombine_f32(vget_high_f32(v), vget_low_f32(v));
+        vst1q_f32(dstExt + cols + 2 + i, vnegq_f32(v));
+    }
+    for (; i < cols; ++i) {
+        dstExt[cols + 2 + i] = -src[cols - 1 - i];
+    }
+}
+
+static void neonDivideEigenRow(float* row, int w, float fy, const float* fx) {
+    int i = 0;
+    const float32x4_t four = vdupq_n_f32(4.0f);
+    const float32x4_t fyv = vdupq_n_f32(fy);
+    for (; i + 4 <= w; i += 4) {
+        const float32x4_t fxv = vld1q_f32(fx + i);
+        const float32x4_t denom = vsubq_f32(vaddq_f32(fxv, fyv), four);
+        float32x4_t v = vld1q_f32(row + i);
+        v = vdivq_f32(v, denom);
+        vst1q_f32(row + i, v);
+    }
+    for (; i < w; ++i) {
+        row[i] /= fx[i] + fy - 4.0f;
+    }
+}
+
+static void neonClampU8Row(uchar* dst, const float* interp, int wInner) {
+    int x = 1;
+    const int end = wInner - 1;
+    for (; x + 4 <= end; x += 4) {
+        float32x4_t v = vld1q_f32(interp + x - 1);
+        v = vmaxq_f32(v, vdupq_n_f32(0.f));
+        v = vminq_f32(v, vdupq_n_f32(255.f));
+        uint32x4_t u32 = vcvtq_u32_f32(v);
+        dst[x] = static_cast<uchar>(vgetq_lane_u32(u32, 0));
+        dst[x + 1] = static_cast<uchar>(vgetq_lane_u32(u32, 1));
+        dst[x + 2] = static_cast<uchar>(vgetq_lane_u32(u32, 2));
+        dst[x + 3] = static_cast<uchar>(vgetq_lane_u32(u32, 3));
+    }
+    for (; x < end; ++x) {
+        const float value = interp[x - 1];
+        if (value < 0.f) {
+            dst[x] = 0;
+        } else if (value > 255.f) {
+            dst[x] = 255;
+        } else {
+            dst[x] = static_cast<uchar>(value);
+        }
+    }
+}
+
+#else
+
+static void neonFlipNegateRow(const float* src, float* dstExt, int cols) {
+    for (int i = 0; i < cols; ++i) {
+        dstExt[cols + 2 + i] = -src[cols - 1 - i];
+    }
+}
+
+static void neonDivideEigenRow(float* row, int w, float fy, const float* fx) {
+    for (int i = 0; i < w; ++i) {
+        row[i] /= fx[i] + fy - 4.0f;
+    }
+}
+
+static void neonClampU8Row(uchar* dst, const float* interp, int wInner) {
+    for (int i = 1; i < wInner - 1; ++i) {
+        const float value = interp[i - 1];
+        if (value < 0.f) {
+            dst[i] = 0;
+        } else if (value > 255.f) {
+            dst[i] = 255;
+        } else {
+            dst[i] = static_cast<uchar>(value);
+        }
+    }
+}
+
+#endif
 
 struct EigenFilters {
     std::vector<float> x;
@@ -62,13 +154,11 @@ struct DstScratch {
         tempA.setTo(0);
         src.copyTo(tempA(cv::Rect(1, 0, cols, rows)));
 
-        for (int j = 0; j < rows; ++j) {
-            float* tempLinePtr = tempA.ptr<float>(j);
-            const float* srcLinePtr = src.ptr<float>(j);
-            for (int i = 0; i < cols; ++i) {
-                tempLinePtr[cols + 2 + i] = -srcLinePtr[cols - 1 - i];
+        cv::parallel_for_(cv::Range(0, rows), [&](const cv::Range& range) {
+            for (int j = range.start; j < range.end; ++j) {
+                neonFlipNegateRow(src.ptr<float>(j), tempA.ptr<float>(j), cols);
             }
-        }
+        });
 
         planeA1.setTo(0);
         cv::Mat planesA[] = {tempA, planeA1};
@@ -208,13 +298,12 @@ private:
 
         scratch.dst.dstTransform(modDiff, scratch.res, false);
 
-        for (int j = 0; j < h - 2; ++j) {
-            float* resLinePtr = scratch.res.ptr<float>(j);
-            for (int i = 0; i < w - 2; ++i) {
-                resLinePtr[i] /= (ws_.filters.x[static_cast<size_t>(i)] + ws_.filters.y[static_cast<size_t>(j)] -
-                                  4.0f);
+        const float* fx = ws_.filters.x.data();
+        cv::parallel_for_(cv::Range(0, h - 2), [&](const cv::Range& range) {
+            for (int j = range.start; j < range.end; ++j) {
+                neonDivideEigenRow(scratch.res.ptr<float>(j), w - 2, ws_.filters.y[static_cast<size_t>(j)], fx);
             }
-        }
+        });
 
         scratch.dst.dstTransform(scratch.res, modDiff, true);
 
@@ -228,18 +317,7 @@ private:
             const float* interpLinePtr = modDiff.ptr<float>(j - 1);
 
             resLinePtr[0] = imgLinePtr[0];
-
-            for (int i = 1; i < w - 1; ++i) {
-                const float value = interpLinePtr[i - 1];
-                if (value < 0.f) {
-                    resLinePtr[i] = 0;
-                } else if (value > 255.f) {
-                    resLinePtr[i] = 255;
-                } else {
-                    resLinePtr[i] = static_cast<uchar>(value);
-                }
-            }
-
+            neonClampU8Row(resLinePtr, interpLinePtr, w);
             resLinePtr[w - 1] = imgLinePtr[w - 1];
         }
 
@@ -388,24 +466,6 @@ void runClone(TopLevelBuffers& buffers, const cv::Mat& src, const cv::Mat& dst, 
     cloner.normalClone(buffers.destinationROI, buffers.sourceROI, maskROI, recoveredROI, flags);
 }
 
-uint64_t mix64(uint64_t x, uint64_t y) {
-    x ^= y + 0x9e3779b97f4a7c15ULL + (x << 6) + (x >> 2);
-    return x;
-}
-
-uint64_t hashMat64(const cv::Mat& m) {
-    if (m.empty()) {
-        return 0;
-    }
-    const cv::Scalar s = cv::sum(m);
-    uint64_t h = static_cast<uint64_t>(m.rows) << 32 | static_cast<uint64_t>(m.cols);
-    h = mix64(h, static_cast<uint64_t>(s[0]));
-    h = mix64(h, static_cast<uint64_t>(s[1]));
-    h = mix64(h, static_cast<uint64_t>(s[2]));
-    h = mix64(h, static_cast<uint64_t>(s[3]));
-    return h;
-}
-
 }  // namespace
 
 namespace seamless_clone_fft {
@@ -429,36 +489,6 @@ void seamlessClone(const cv::Mat& src, const cv::Mat& dst, const cv::Mat& mask, 
                    cv::Mat& output, int flags) {
     Context ctx;
     ctx.seamlessClone(src, dst, mask, center, output, flags);
-}
-
-uint64_t fingerprintInputs(const cv::Mat& src, const cv::Mat& dst, const cv::Mat& mask, cv::Point center) {
-    uint64_t fp = hashMat64(src);
-    fp = mix64(fp, hashMat64(dst));
-    fp = mix64(fp, hashMat64(mask));
-    fp = mix64(fp, static_cast<uint64_t>(center.x));
-    fp = mix64(fp, static_cast<uint64_t>(center.y));
-    return fp;
-}
-
-bool seamlessCloneSkipUnchanged(SkipState& state, const cv::Mat& src, const cv::Mat& dst,
-                                  const cv::Mat& mask, cv::Point center, cv::Mat& output, int flags,
-                                  Context* ctx) {
-    const uint64_t fp = fingerprintInputs(src, dst, mask, center);
-    if (fp == state.fingerprint && !state.cachedOutput.empty() &&
-        state.cachedOutput.size() == dst.size() && state.cachedOutput.type() == dst.type()) {
-        state.cachedOutput.copyTo(output);
-        return true;
-    }
-
-    if (ctx != nullptr) {
-        ctx->seamlessClone(src, dst, mask, center, output, flags);
-    } else {
-        seamlessClone(src, dst, mask, center, output, flags);
-    }
-
-    output.copyTo(state.cachedOutput);
-    state.fingerprint = fp;
-    return false;
 }
 
 }  // namespace seamless_clone_fft
