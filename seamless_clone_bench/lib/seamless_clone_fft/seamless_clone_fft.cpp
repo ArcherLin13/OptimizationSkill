@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
@@ -154,11 +155,9 @@ struct DstScratch {
         tempA.setTo(0);
         src.copyTo(tempA(cv::Rect(1, 0, cols, rows)));
 
-        cv::parallel_for_(cv::Range(0, rows), [&](const cv::Range& range) {
-            for (int j = range.start; j < range.end; ++j) {
-                neonFlipNegateRow(src.ptr<float>(j), tempA.ptr<float>(j), cols);
-            }
-        });
+        for (int j = 0; j < rows; ++j) {
+            neonFlipNegateRow(src.ptr<float>(j), tempA.ptr<float>(j), cols);
+        }
 
         planeA1.setTo(0);
         cv::Mat planesA[] = {tempA, planeA1};
@@ -299,11 +298,9 @@ private:
         scratch.dst.dstTransform(modDiff, scratch.res, false);
 
         const float* fx = ws_.filters.x.data();
-        cv::parallel_for_(cv::Range(0, h - 2), [&](const cv::Range& range) {
-            for (int j = range.start; j < range.end; ++j) {
-                neonDivideEigenRow(scratch.res.ptr<float>(j), w - 2, ws_.filters.y[static_cast<size_t>(j)], fx);
-            }
-        });
+        for (int j = 0; j < h - 2; ++j) {
+            neonDivideEigenRow(scratch.res.ptr<float>(j), w - 2, ws_.filters.y[static_cast<size_t>(j)], fx);
+        }
 
         scratch.dst.dstTransform(scratch.res, modDiff, true);
 
@@ -381,10 +378,23 @@ private:
         cv::split(ws_.laplacianY, ws_.rgbyChannel);
         cv::split(destination, ws_.output);
 
+        // Poisson solve is per-channel; each channel has private DST buffers. Run 3 channels in
+        // parallel — this is where ~90% of time is spent (cv::dft inside DST).
+        const int savedThreads = cv::getNumThreads();
+        const int perChannelThreads = std::max(1, savedThreads / 3);
+        cv::setNumThreads(perChannelThreads);
+
+        std::thread workers[3];
         for (int chan = 0; chan < 3; ++chan) {
-            poissonSolver(ws_.output[chan], ws_.rgbxChannel[chan], ws_.rgbyChannel[chan], ws_.output[chan],
-                          ws_.channel[chan]);
+            workers[chan] = std::thread([this, chan]() {
+                poissonSolver(ws_.output[chan], ws_.rgbxChannel[chan], ws_.rgbyChannel[chan],
+                              ws_.output[chan], ws_.channel[chan]);
+            });
         }
+        for (auto& w : workers) {
+            w.join();
+        }
+        cv::setNumThreads(savedThreads);
     }
 
     void evaluate(const cv::Mat& destination, cv::Mat& wmask, cv::Mat& cloned) {
