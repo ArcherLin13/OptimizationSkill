@@ -1,11 +1,12 @@
 #include "poisson_jacobi.h"
 
+#include "seamless_clone_jacobi.h"
 #include "seamless_roi.h"
-
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 #if defined(__OHOS__) || defined(__ANDROID__) || defined(__linux__)
@@ -358,6 +359,8 @@ OpenCLPoisson gOpenCL;
 
 #endif  // POISSON_JACOBI_DLOPEN
 
+}  // namespace
+
 bool runJacobiPoissonCore(const BenchCase& bench, cv::Mat& output, int iterations, bool useOpenCL) {
     SeamlessRoi roi;
     if (!extractSeamlessRoi(bench, roi)) {
@@ -392,7 +395,38 @@ bool runJacobiPoissonCore(const BenchCase& bench, cv::Mat& output, int iteration
     return true;
 }
 
-}  // namespace
+bool jacobiNormalClone(const cv::Mat& src, const cv::Mat& dst, const cv::Mat& mask, cv::Point center,
+                       cv::Mat& output, int iterations, bool useOpenCL) {
+    BenchCase bench;
+    bench.src = src;
+    bench.dst = dst;
+    bench.mask = mask;
+    bench.center = center;
+    return runJacobiPoissonCore(bench, output, iterations, useOpenCL);
+}
+
+namespace seamless_clone_jacobi {
+
+void seamlessClone(const cv::Mat& src, const cv::Mat& dst, const cv::Mat& mask, cv::Point center,
+                   cv::Mat& output, int flags, int iterations) {
+    if (flags != 1) {  // cv::NORMAL_CLONE
+        throw std::invalid_argument("seamless_clone_jacobi::seamlessClone only supports NORMAL_CLONE");
+    }
+    if (src.empty() || dst.empty() || mask.empty()) {
+        throw std::invalid_argument("seamless_clone_jacobi::seamlessClone: empty input");
+    }
+    if (src.size() != dst.size() || src.size() != mask.size()) {
+        throw std::invalid_argument("seamless_clone_jacobi::seamlessClone: src/dst/mask size mismatch");
+    }
+    if (src.type() != CV_8UC3 || dst.type() != CV_8UC3) {
+        throw std::invalid_argument("seamless_clone_jacobi::seamlessClone: src/dst must be CV_8UC3");
+    }
+    if (!jacobiNormalClone(src, dst, mask, center, output, iterations, false)) {
+        throw std::runtime_error("seamless_clone_jacobi::seamlessClone: invalid mask or ROI");
+    }
+}
+
+}  // namespace seamless_clone_jacobi
 
 bool isOpenCLPoissonAvailable() {
 #ifdef POISSON_JACOBI_DLOPEN
@@ -406,5 +440,6 @@ bool runJacobiPoissonClone(const BenchCase& bench, cv::Mat& output, int iteratio
     if (useOpenCL && !isOpenCLPoissonAvailable()) {
         return false;
     }
-    return runJacobiPoissonCore(bench, output, iterations, useOpenCL);
+    return jacobiNormalClone(bench.src, bench.dst, bench.mask, bench.center, output, iterations,
+                             useOpenCL);
 }
