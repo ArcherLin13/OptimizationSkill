@@ -21,7 +21,6 @@ add_executable(seamless_clone_bench
   lib/seamless_clone_jacobi/seamless_clone_jacobi.cpp
   lib/seamless_clone_fft/seamless_clone_fft.cpp
   lib/seamless_clone_fft/sc_fft_rows.cpp
-  lib/seamless_clone_fft/ocv_dft_32f.cpp
   src/visual_export.cpp
 )
 
