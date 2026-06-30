@@ -1,6 +1,6 @@
 # seamless_clone_fft
 
-OpenCV 4.9 `NORMAL_CLONE` reimplementation (DST/DFT). Verified `maxDiff=0` vs `cv::seamlessClone`.
+OpenCV 4.9 `NORMAL_CLONE` reimplementation (DST/DFT). Target: `maxDiff=0` vs `cv::seamlessClone`.
 
 ## Production usage
 
@@ -16,16 +16,16 @@ void onFrame(...) {
 
 ## Optimizations
 
-- Reused ROI / gradient / DST buffers (`Context`)
-- **3 RGB channels solved in parallel** (separate DST scratch per channel)
-- `cv::setNumThreads(n/3)` per channel so `cv::dft` does not oversubscribe
+- **pocketfft** replaces `cv::dft` in DST (cached plans, better factors on 1434/228 lengths)
+- **3 RGB channels** solved in parallel (private DST scratch each)
+- `cv::setNumThreads(n/3)` per channel
 - ARM NEON for DST padding, eigen divide, uchar clamp
-
-Dominant cost is still `cv::dft`. Expect ~1.5–2.5× vs OpenCV `seamlessClone` on multi-core ARM when maxDiff=0.
+- Context buffer reuse
 
 ## Files
 
-- `seamless_clone_fft.h`
-- `seamless_clone_fft.cpp`
+- `seamless_clone_fft.h` / `seamless_clone_fft.cpp`
+- `sc_fft_rows.h` / `sc_fft_rows.cpp` — row FFT wrapper
+- `pocketfft_hdronly.h` — vendored pocketfft (BSD-3-Clause)
 
 Link OpenCV **core + imgproc** only.
