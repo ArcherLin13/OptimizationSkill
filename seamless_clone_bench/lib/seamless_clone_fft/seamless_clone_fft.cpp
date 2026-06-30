@@ -36,32 +36,29 @@ EigenFilters makeFilters(int w, int h) {
 struct DstScratch {
     cv::Mat tempA;
     cv::Mat tempB;
-    cv::Mat complex;
-    cv::Mat plane0;
-    cv::Mat plane1;
-
-    void ensure(int rows, int cols) {
-        const cv::Size t1(cols, rows);
-        if (tempA.size() != t1) {
-            tempA.create(rows, 2 * cols + 2, CV_32F);
-            plane0.create(rows, 2 * cols + 2, CV_32F);
-        }
-        const cv::Size t2(rows, 2 * cols + 2);
-        if (tempB.size() != t2) {
-            tempB.create(cols, 2 * rows + 2, CV_32F);
-        }
-        if (complex.size() != t1) {
-            complex.create(t1, CV_32FC2);
-            plane1.create(t1, CV_32F);
-        }
-    }
+    cv::Mat complexA;
+    cv::Mat complexB;
+    cv::Mat planeA1;
+    cv::Mat planeB1;
 
     void dstTransform(const cv::Mat& src, cv::Mat& dest, bool invert) {
         const int flag = invert ? cv::DFT_ROWS + cv::DFT_SCALE + cv::DFT_INVERSE : cv::DFT_ROWS;
         const int rows = src.rows;
         const int cols = src.cols;
 
-        ensure(rows, cols);
+        const cv::Size sizeA(2 * cols + 2, rows);
+        if (tempA.size() != sizeA) {
+            tempA.create(rows, 2 * cols + 2, CV_32F);
+            planeA1.create(rows, 2 * cols + 2, CV_32F);
+            complexA.create(sizeA, CV_32FC2);
+        }
+        const cv::Size sizeB(2 * rows + 2, cols);
+        if (tempB.size() != sizeB) {
+            tempB.create(cols, 2 * rows + 2, CV_32F);
+            planeB1.create(sizeB, CV_32F);
+            complexB.create(sizeB, CV_32FC2);
+        }
+
         tempA.setTo(0);
         src.copyTo(tempA(cv::Rect(1, 0, cols, rows)));
 
@@ -73,28 +70,29 @@ struct DstScratch {
             }
         }
 
-        plane1.setTo(0);
-        cv::Mat planes[] = {tempA, plane1};
-        cv::merge(planes, 2, complex);
-        cv::dft(complex, complex, flag);
-        cv::split(complex, planes);
+        planeA1.setTo(0);
+        cv::Mat planesA[] = {tempA, planeA1};
+        cv::merge(planesA, 2, complexA);
+        cv::dft(complexA, complexA, flag);
+        cv::split(complexA, planesA);
 
         tempB.setTo(0);
         for (int j = 0; j < cols; ++j) {
             float* tempLinePtr = tempB.ptr<float>(j);
             for (int i = 0; i < rows; ++i) {
-                const float val = planes[1].ptr<float>(i)[j + 1];
+                const float val = planesA[1].ptr<float>(i)[j + 1];
                 tempLinePtr[i + 1] = val;
                 tempLinePtr[tempB.cols - 1 - i] = -val;
             }
         }
 
-        cv::Mat planes2[] = {tempB, plane1};
-        cv::merge(planes2, 2, complex);
-        cv::dft(complex, complex, flag);
-        cv::split(complex, planes2);
+        planeB1.setTo(0);
+        cv::Mat planesB[] = {tempB, planeB1};
+        cv::merge(planesB, 2, complexB);
+        cv::dft(complexB, complexB, flag);
+        cv::split(complexB, planesB);
 
-        cv::Mat transposed = planes2[1].t();
+        cv::Mat transposed = planesB[1].t();
         transposed(cv::Rect(0, 1, cols, rows)).copyTo(dest);
     }
 };
@@ -103,7 +101,6 @@ struct ChannelScratch {
     cv::Mat bound;
     cv::Mat boundaryPoints;
     cv::Mat lap;
-    cv::Mat modDiff;
     cv::Mat res;
     DstScratch dst;
 
@@ -111,7 +108,6 @@ struct ChannelScratch {
         bound.create(h, w, CV_8UC1);
         boundaryPoints.create(h, w, CV_32F);
         lap.create(h, w, CV_32F);
-        modDiff.create(h - 2, w - 2, CV_32F);
         res.create(h - 2, w - 2, CV_32F);
     }
 };
@@ -265,10 +261,10 @@ private:
         cv::rectangle(scratch.bound, cv::Point(1, 1), cv::Point(w - 2, h - 2), cv::Scalar::all(0), -1);
         cv::Laplacian(scratch.bound, scratch.boundaryPoints, CV_32F);
 
-        cv::subtract(scratch.lap, scratch.boundaryPoints, scratch.lap);
-        scratch.lap(cv::Rect(1, 1, w - 2, h - 2)).copyTo(scratch.modDiff);
+        cv::subtract(scratch.lap, scratch.boundaryPoints, scratch.boundaryPoints);
+        cv::Mat modDiff = scratch.boundaryPoints(cv::Rect(1, 1, w - 2, h - 2));
 
-        solvePoisson(img, scratch.modDiff, result, scratch);
+        solvePoisson(img, modDiff, result, scratch);
     }
 
     void computeDerivatives(const cv::Mat& destination, const cv::Mat& patch, cv::Mat& binaryMask) {
@@ -307,12 +303,10 @@ private:
         cv::split(ws_.laplacianY, ws_.rgbyChannel);
         cv::split(destination, ws_.output);
 
-        cv::parallel_for_(cv::Range(0, 3), [&](const cv::Range& range) {
-            for (int chan = range.start; chan < range.end; ++chan) {
-                poissonSolver(ws_.output[chan], ws_.rgbxChannel[chan], ws_.rgbyChannel[chan],
-                              ws_.output[chan], ws_.channel[chan]);
-            }
-        });
+        for (int chan = 0; chan < 3; ++chan) {
+            poissonSolver(ws_.output[chan], ws_.rgbxChannel[chan], ws_.rgbyChannel[chan], ws_.output[chan],
+                          ws_.channel[chan]);
+        }
     }
 
     void evaluate(const cv::Mat& destination, cv::Mat& wmask, cv::Mat& cloned) {
