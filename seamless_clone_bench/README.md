@@ -127,6 +127,11 @@ seamless_clone_jacobi::seamlessClone(src, dst, mask, center, output);
 
 仅依赖 OpenCV **core + imgproc**，无 OpenCL、无 `opencv_photo`、无 `dl`。
 
+### Phase A：FFT 完全一致验证（进行中）
+
+`lib/seamless_clone_fft/` 按 OpenCV 4.9 源码移植了 DST/DFT Poisson 求解器。  
+设备上跑 benchmark 看 **`poisson_fft`** 行：必须 `maxDiff=0` 且标记为 `SAME` 才算 Phase A 通过；通过后再做 FFT 加速（Phase B）。
+
 默认 **不再** 需要 `build_opencv.ps1`。若要用自编的 OpenCV 4.9：
 
 ```powershell

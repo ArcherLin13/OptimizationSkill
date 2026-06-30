@@ -4,6 +4,7 @@
 #include "image_io.h"
 #include "log_format.h"
 #include "metrics.h"
+#include "poisson_fft.h"
 #include "poisson_jacobi.h"
 
 #include <opencv2/imgproc.hpp>
@@ -130,6 +131,9 @@ int runVisualExport(const BenchCase& bench, const std::string& exportDir) {
     addVariant(entries, "03_baseline", "baseline", baselineRef, cv::Mat());
 
     cv::Mat out;
+    runFftPoissonClone(bench, out);
+    addVariant(entries, "03b_poisson_fft", "poisson_fft", out, baselineRef);
+
     runPreallocOutClone(bench, preallocOut);
     addVariant(entries, "04_prealloc_out", "prealloc_out", preallocOut, baselineRef);
 

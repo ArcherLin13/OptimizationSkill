@@ -2,6 +2,7 @@
 #include "log_format.h"
 #include "metrics.h"
 #include "optimized_clone.h"
+#include "poisson_fft.h"
 #include "poisson_jacobi.h"
 #include "seamless_roi.h"
 #include "timing.h"
@@ -104,6 +105,9 @@ int runBenchmark(const BenchCase& bench) {
     variants.push_back({"baseline", VariantKind::Reference,
                          [&](cv::Mat& out) { runBaselineClone(bench, out); }, 100.0, 0.0,
                          "rect mask, default OpenCV path"});
+    variants.push_back({"poisson_fft", VariantKind::Identical,
+                        [&](cv::Mat& out) { runFftPoissonClone(bench, out); }, 100.0, 0.0,
+                        "OpenCV 4.9 NORMAL_CLONE reimplementation (DST/DFT)"});
     variants.push_back(
         {"prealloc_out", VariantKind::Identical,
          [&](cv::Mat& out) {
