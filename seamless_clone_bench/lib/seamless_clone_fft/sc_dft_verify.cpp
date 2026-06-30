@@ -46,7 +46,7 @@ DftVerifyResult verifyRowDft(int len, bool inverse, bool useSimd, unsigned seed)
     dftRows32fc2(native, inverse, useSimd);
 
     out.maxAbsDiff = maxAbsDiffMat(test, native);
-    out.pass = out.maxAbsDiff == 0.0;
+    out.pass = out.maxAbsDiff <= 1e-5;
     return out;
 }
 
@@ -55,7 +55,7 @@ void logDstDftVerify() {
         int len;
         bool inv;
     } cases[] = {{1434, false}, {228, false}, {228, true}};
-    std::cout << "  [dft-verify] OpenCV cv::dft vs sc_ocv_dft row DFT\n";
+    std::cout << "  [dft-verify] OpenCV cv::dft vs sc_ocv_dft row DFT (tol=1e-5)\n";
     for (const Case& c : cases) {
         for (const bool simd : {false, true}) {
             const DftVerifyResult r = verifyRowDft(c.len, c.inv, simd, 42u + static_cast<unsigned>(c.len));

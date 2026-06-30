@@ -1050,7 +1050,12 @@ struct DftPlan {
     OcvDftOptions opt{};
     std::vector<int> itab;
     std::vector<Complex<float>> wave;
+    std::vector<Complex<float>> scratch;
 };
+
+static bool needsOutOfPlacePermute(const OcvDftOptions& opt) {
+    return opt.nf > 0 && opt.factors[0] != opt.factors[opt.nf - 1];
+}
 
 static DftPlan makePlan(int len, bool inverse, bool scaled, bool useSimd) {
     DftPlan p;
@@ -1072,6 +1077,7 @@ static DftPlan makePlan(int len, bool inverse, bool scaled, bool useSimd) {
     p.opt.nf = DFTFactorize(len, p.opt.factors);
     p.itab.resize(len);
     p.wave.resize(len);
+    p.scratch.resize(len);
     p.opt.itab = p.itab.data();
     p.opt.wave = p.wave.data();
     DFTInit(len, p.opt.nf, p.opt.factors, p.opt.itab, sizeof(Complex<float>), p.opt.wave, 0);
@@ -1081,7 +1087,7 @@ static DftPlan makePlan(int len, bool inverse, bool scaled, bool useSimd) {
 static std::mutex g_planMu;
 static std::unordered_map<uint64_t, DftPlan> g_plans;
 
-static const DftPlan& planFor(int len, bool inverse, bool scaled, bool useSimd) {
+static DftPlan& planFor(int len, bool inverse, bool scaled, bool useSimd) {
     const uint64_t key = (static_cast<uint64_t>(len) << 3) | (useSimd ? 4u : 0u) | (inverse ? 2u : 0u) |
                          (scaled ? 1u : 0u);
     std::lock_guard<std::mutex> lock(g_planMu);
@@ -1099,10 +1105,15 @@ void dft1dComplex32fInplace(float* interleaved, int len, bool inverse, bool scal
     if (len <= 0) {
         return;
     }
-    const DftPlan& plan = planFor(len, inverse, scaled, useSimd);
-    OcvDftOptions opt = plan.opt;
+    DftPlan& plan = planFor(len, inverse, scaled, useSimd);
+    const OcvDftOptions& opt = plan.opt;
     auto* data = reinterpret_cast<Complex<float>*>(interleaved);
-    DFT_32f(opt, data, data);
+    if (needsOutOfPlacePermute(opt)) {
+        DFT_32f(opt, data, plan.scratch.data());
+        std::memcpy(data, plan.scratch.data(), static_cast<size_t>(len) * sizeof(Complex<float>));
+    } else {
+        DFT_32f(opt, data, data);
+    }
 }
 
 }  // namespace sc_ocv_dft
