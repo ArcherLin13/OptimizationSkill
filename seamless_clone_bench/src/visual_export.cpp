@@ -159,7 +159,7 @@ int runVisualExport(const BenchCase& bench, const std::string& exportDir) {
     int written = 0;
     printBanner("Visual Export");
     printKv("export dir", exportDir);
-    printSubBanner("输出文件");
+    printSubBanner("Output files");
 
     for (const VisualExportEntry& entry : entries) {
         const std::string path = joinPath(exportDir, entry.fileStem + ".bmp");
@@ -203,10 +203,10 @@ int runVisualExport(const BenchCase& bench, const std::string& exportDir) {
         std::cout << "  grid_diff_x8.bmp   (absdiff vs baseline, x8)\n";
     }
 
-    printSubBanner("如何查看");
-    std::cout << "  手机路径:  " << exportDir << "\n";
-    std::cout << "  拉回电脑:  .\\scripts\\pull_results.ps1\n";
-    std::cout << "  重点看:    grid_results.bmp / grid_diff_x8.bmp\n\n";
+    printSubBanner("How to view");
+    std::cout << "  on device:  " << exportDir << "\n";
+    std::cout << "  pull to PC: .\\scripts\\pull_results.ps1\n";
+    std::cout << "  key files:  grid_results.bmp / grid_diff_x8.bmp\n\n";
 
     return written;
 }

@@ -62,10 +62,10 @@ TimingStats timeVariant(const Variant& variant) {
 }
 
 void printLegend() {
-    printSubBanner("列说明");
-    std::cout << "  kind   REF=参考基准  SAME=应与baseline逐像素一致  FAST=更快但结果不同  APRX=近似算法\n";
-    std::cout << "  ok     PASS=达到该路径的质量阈值  FAIL=未达到\n";
-    std::cout << "  计时   " << kWarmupRuns << " 次预热 + " << kMeasureRuns << " 次采样，取 avg/min/max\n";
+    printSubBanner("Legend");
+    std::cout << "  kind   REF=reference  SAME=must match baseline exactly  FAST=faster, different result  APRX=approx\n";
+    std::cout << "  ok     PASS=meets quality threshold for this path  FAIL=does not meet\n";
+    std::cout << "  timing " << kWarmupRuns << " warmup + " << kMeasureRuns << " runs, report avg/min/max\n";
 }
 
 }  // namespace
@@ -77,12 +77,12 @@ int runBenchmark() {
     const int maskFg = cv::countNonZero(bench.mask);
     const int solverPx = solverBoundingRectPixels(bench);
 
-    printSubBanner("环境");
+    printSubBanner("Environment");
     printKv("OpenCV", CV_VERSION);
     printKv("CPU threads", std::to_string(cv::getNumThreads()));
     printKv("OpenCL", isOpenCLPoissonAvailable() ? "yes" : "no");
 
-    printSubBanner("测试用例");
+    printSubBanner("Test case");
     printKv("src / dst", std::to_string(bench.src.cols) + "x" + std::to_string(bench.src.rows) +
                             "  CV_8UC3");
     printKv("mask", "rect(5,5,718,115)  fg=" + std::to_string(maskFg));
@@ -106,39 +106,39 @@ int runBenchmark() {
     std::vector<Variant> variants;
     variants.push_back({"baseline", VariantKind::Reference,
                          [&](cv::Mat& out) { runBaselineClone(bench, out); }, 100.0, 0.0,
-                         "矩形 mask，OpenCV 默认路径"});
+                         "rect mask, default OpenCV path"});
     variants.push_back(
         {"prealloc_out", VariantKind::Identical,
          [&](cv::Mat& out) {
              runPreallocOutClone(bench, preallocOut);
              out = preallocOut;
          },
-         100.0, 0.0, "预先 create 输出 Mat"});
+         100.0, 0.0, "pre-create output Mat before clone"});
     variants.push_back({"pooled_reuse", VariantKind::Identical,
                         [&](cv::Mat& out) { runPooledClone(pool, bench, out); }, 100.0, 0.0,
-                        "复用 src/dst/mask/out buffer"});
+                        "reuse src/dst/mask/out buffers"});
 
     for (int threads : {1, 2, 4, 8}) {
         variants.push_back({"threads_" + std::to_string(threads), VariantKind::Identical,
                             [&, threads](cv::Mat& out) { runBaselineCloneThreads(bench, out, threads); },
-                            100.0, 0.0, "cv::setNumThreads 扫描"});
+                            100.0, 0.0, "cv::setNumThreads sweep"});
     }
 
     variants.push_back({"full_mask", VariantKind::Fast,
                         [&](cv::Mat& out) { runFullMaskClone(bench, out); }, 42.0, 6.0,
-                        "mask 全 255，solver bbox 更大但 FFT 更快"});
+                        "mask all 255, larger solver bbox but faster FFT"});
     variants.push_back({"full_mask_border_paste5", VariantKind::Fast,
                         [&](cv::Mat& out) { runFullMaskBorderPasteClone(bench, out, 5); }, 42.0, 6.0,
-                        "满 mask clone 后贴回 5px 边框"});
+                        "full mask clone, paste back 5px dst border"});
     variants.push_back({"aligned_736x128", VariantKind::Fast,
                         [&](cv::Mat& out) { runAlignedClone(bench, out, 32); }, 42.0, 6.0,
-                        "pad 到 736x128"});
+                        "pad to 736x128"});
     variants.push_back({"half_res", VariantKind::Fast,
                         [&](cv::Mat& out) { runHalfResClone(bench, out); }, 28.0, 25.0,
-                        "半分辨率求解后放大"});
+                        "half-res solve then upscale"});
     variants.push_back({"jacobi_cpu", VariantKind::Approx,
                         [&](cv::Mat& out) { runJacobiPoissonClone(bench, out, kJacobiIterations, false); },
-                        28.0, 25.0, "CPU Jacobi Poisson（GPU 同类算法）"});
+                        28.0, 25.0, "CPU Jacobi Poisson (same family as GPU path)"});
 
     if (isOpenCLPoissonAvailable()) {
         variants.push_back({"jacobi_opencl", VariantKind::Approx,
@@ -171,7 +171,7 @@ int runBenchmark() {
     }
 
     printLegend();
-    printSubBanner("结果总表（baseline = 矩形 mask）");
+    printSubBanner("Results (baseline = rect mask)");
     printResultTableHeader();
 
     bool identicalPass = true;
@@ -189,7 +189,7 @@ int runBenchmark() {
         }
     }
 
-    printSubBanner("路径说明");
+    printSubBanner("Path notes");
     for (const VariantResult& row : results) {
         if (row.variant.name == "baseline") {
             continue;
@@ -197,13 +197,13 @@ int runBenchmark() {
         printNote(row.variant.name.c_str(), row.variant.note);
     }
 
-    printSubBanner("补充：仅改 mask 为满 mask");
+    printSubBanner("Extra: full mask only (same src/dst)");
     cv::Mat fullOut;
     double fullMs = 0.0;
     timeOnce([&]() { runFullMaskClone(bench, fullOut); }, fullMs);
     const CompareResult fullVsRect = compareImages(baselineOut, fullOut, 42.0, 6.0);
     std::cout << std::fixed << std::setprecision(2);
-    std::cout << "  full_mask (同 src/dst):  " << fullMs << " ms"
+    std::cout << "  full_mask (same src/dst): " << fullMs << " ms"
               << "   vs baseline " << baselineAvgMs << " ms"
               << "   speedup " << (baselineAvgMs / std::max(fullMs, 1e-6)) << "x\n";
     std::cout << "  quality vs rect mask:    PSNR=" << fullVsRect.psnr
@@ -211,7 +211,7 @@ int runBenchmark() {
               << (fullVsRect.pass ? "PASS" : "FAIL") << "\n";
 
     printBanner(identicalPass ? "SAME paths: PASS" : "SAME paths: FAIL");
-    std::cout << "  SAME 类路径要求 maxDiff=0（prealloc / pooled / threads）\n\n";
+    std::cout << "  SAME paths require maxDiff=0 (prealloc / pooled / threads)\n\n";
 
     return identicalPass ? 0 : 1;
 }
