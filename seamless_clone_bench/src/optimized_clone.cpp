@@ -1,5 +1,7 @@
 #include "optimized_clone.h"
 
+#include "seamless_roi.h"
+
 #include <opencv2/imgproc.hpp>
 #include <opencv2/photo.hpp>
 
@@ -31,12 +33,45 @@ void runBaselineClone(const BenchCase& bench, cv::Mat& output) {
     cv::seamlessClone(bench.src, bench.dst, bench.mask, bench.center, output, cv::NORMAL_CLONE);
 }
 
+void runBaselineCloneThreads(const BenchCase& bench, cv::Mat& output, int threads) {
+    const int prev = cv::getNumThreads();
+    cv::setNumThreads(threads);
+    cv::seamlessClone(bench.src, bench.dst, bench.mask, bench.center, output, cv::NORMAL_CLONE);
+    cv::setNumThreads(prev);
+}
+
+void runPreallocOutClone(const BenchCase& bench, cv::Mat& output) {
+    output.create(bench.dst.size(), bench.dst.type());
+    cv::seamlessClone(bench.src, bench.dst, bench.mask, bench.center, output, cv::NORMAL_CLONE);
+}
+
 void runPooledClone(PooledCloneContext& ctx, const BenchCase& bench, cv::Mat& output) {
     bench.src.copyTo(ctx.srcBuf);
     bench.dst.copyTo(ctx.dstBuf);
     bench.mask.copyTo(ctx.maskBuf);
     cv::seamlessClone(ctx.srcBuf, ctx.dstBuf, ctx.maskBuf, bench.center, ctx.outBuf, cv::NORMAL_CLONE);
     ctx.outBuf.copyTo(output);
+}
+
+void runFullMaskClone(const BenchCase& bench, cv::Mat& output) {
+    const cv::Mat fullMask(bench.mask.size(), CV_8UC1, cv::Scalar(255));
+    cv::seamlessClone(bench.src, bench.dst, fullMask, bench.center, output, cv::NORMAL_CLONE);
+}
+
+void runFullMaskBorderPasteClone(const BenchCase& bench, cv::Mat& output, int borderPx) {
+    runFullMaskClone(bench, output);
+
+    cv::Mat keepDst;
+    if (borderPx > 0) {
+        keepDst = cv::Mat::zeros(bench.mask.size(), CV_8UC1);
+        const cv::Rect inner(borderPx, borderPx, bench.mask.cols - 2 * borderPx,
+                             bench.mask.rows - 2 * borderPx);
+        keepDst(inner).setTo(255);
+        cv::bitwise_not(keepDst, keepDst);
+    } else {
+        cv::bitwise_not(bench.mask, keepDst);
+    }
+    bench.dst.copyTo(output, keepDst);
 }
 
 void runAlignedClone(const BenchCase& bench, cv::Mat& output, int align) {

@@ -1,210 +1,217 @@
-#include "optimized_clone.h"
+#include "bench_case.h"
+#include "log_format.h"
 #include "metrics.h"
+#include "optimized_clone.h"
+#include "poisson_jacobi.h"
+#include "seamless_roi.h"
 #include "timing.h"
 
-#include <iomanip>
+#include <functional>
 #include <iostream>
 #include <opencv2/imgproc.hpp>
+#include <string>
+#include <vector>
 
 namespace {
 
-BenchCase makeUserCase() {
-  BenchCase bench;
-  bench.src = cv::Mat(126, 729, CV_8UC3);
-  bench.dst = cv::Mat(126, 729, CV_8UC3);
-  bench.mask = cv::Mat::zeros(126, 729, CV_8UC1);
-  bench.center = cv::Point(364, 62);
+constexpr int kWarmupRuns = 2;
+constexpr int kMeasureRuns = 5;
+constexpr int kJacobiIterations = 400;
 
-  for (int y = 0; y < bench.src.rows; ++y) {
-    for (int x = 0; x < bench.src.cols; ++x) {
-      bench.src.at<cv::Vec3b>(y, x) =
-          cv::Vec3b(static_cast<uchar>((x * 3) % 256), static_cast<uchar>((y * 5) % 256),
-                    static_cast<uchar>(((x + y) * 2) % 256));
-      bench.dst.at<cv::Vec3b>(y, x) =
-          cv::Vec3b(static_cast<uchar>((x + 40) % 256), static_cast<uchar>((y + 80) % 256),
-                    static_cast<uchar>(((x + y + 120) * 2) % 256));
+enum class VariantKind { Reference, Identical, Fast, Approx };
+
+const char* kindLabel(VariantKind kind) {
+    switch (kind) {
+        case VariantKind::Reference:
+            return "REF";
+        case VariantKind::Identical:
+            return "SAME";
+        case VariantKind::Fast:
+            return "FAST";
+        case VariantKind::Approx:
+            return "APRX";
     }
-  }
-
-  cv::ellipse(bench.mask, bench.center, cv::Size(300, 50), 0, 0, 360, cv::Scalar(255), -1);
-  return bench;
+    return "?";
 }
 
-BenchCase makeDenseMaskCase() {
-  BenchCase bench = makeUserCase();
-  bench.mask.setTo(255);
-  return bench;
+BenchCase makeUserCase() {
+    return makeVisualBenchCase();
 }
 
-void printOutInfo(const char* label, const cv::Mat& out, int maskFg) {
-  std::cout << label << ": " << out.cols << "x" << out.rows << " type=" << out.type()
-            << " continuous="
-            << (out.empty() ? -1 : (out.step == (size_t)out.cols * out.elemSize()))
-            << " (mask fg=" << maskFg << ")\n";
+struct Variant {
+    std::string name;
+    VariantKind kind;
+    std::function<void(cv::Mat&)> run;
+    double psnrThreshold;
+    double maxDiffThreshold;
+    const char* note;
+};
+
+struct VariantResult {
+    Variant variant;
+    TimingStats stats{};
+    CompareResult compare{};
+    bool hasCompare = false;
+};
+
+TimingStats timeVariant(const Variant& variant) {
+    return measureMs(kWarmupRuns, kMeasureRuns, [&]() {
+        cv::Mat out;
+        variant.run(out);
+    });
 }
 
-void printStats(const char* label, const TimingStats& stats) {
-  std::cout << std::fixed << std::setprecision(2);
-  std::cout << label << ": avg=" << stats.avgMs << "ms min=" << stats.minMs
-            << "ms max=" << stats.maxMs << "ms\n";
-}
-
-void runAllocExperiment(const char* tag, const BenchCase& bench) {
-  const int maskFg = cv::countNonZero(bench.mask);
-  std::cout << "--- output alloc experiment: " << tag
-            << " (mask fg=" << maskFg << ") ---\n";
-
-  cv::Mat show;
-  printOutInfo("before_clone", show, maskFg);
-
-  double coldEmptyMs = 0.0;
-  cv::Mat coldOut;
-  timeOnce([&]() { runBaselineClone(bench, coldOut); }, coldEmptyMs);
-  printOutInfo("after_empty_out", coldOut, maskFg);
-  std::cout << std::fixed << std::setprecision(2) << "cold_empty_out: " << coldEmptyMs
-            << " ms\n";
-
-  cv::Mat prealloc;
-  prealloc.create(bench.dst.rows, bench.dst.cols, CV_8UC3);
-  printOutInfo("prealloc_before", prealloc, maskFg);
-
-  double coldPreallocMs = 0.0;
-  timeOnce([&]() { runBaselineClone(bench, prealloc); }, coldPreallocMs);
-  std::cout << std::fixed << std::setprecision(2) << "cold_prealloc_out: " << coldPreallocMs
-            << " ms\n";
-
-  const TimingStats emptyStats = measureMs(0, 5, [&]() {
-    cv::Mat out;
-    runBaselineClone(bench, out);
-  });
-  printStats("empty_out_each_call", emptyStats);
-
-  const TimingStats preallocStats = measureMs(0, 5, [&]() {
-    runBaselineClone(bench, prealloc);
-  });
-  printStats("reuse_prealloc_out", preallocStats);
-}
-
-void printCompare(const char* label, const CompareResult& cmp, const char* note) {
-  std::cout << label << " correctness: psnr=" << cmp.psnr << "dB maxDiff=" << cmp.maxAbsDiff
-            << " => " << (cmp.pass ? "PASS" : "FAIL") << " (" << note << ")\n";
-}
-
-using BaselineFn = void (*)(const BenchCase&, cv::Mat&);
-
-void timeBaselineCall(const char* label, const BenchCase& bench, BaselineFn fn) {
-  double ms = 0.0;
-  cv::Mat out;
-  timeOnce([&]() { fn(bench, out); }, ms);
-  std::cout << std::fixed << std::setprecision(2) << label << ": " << ms << " ms\n";
+void printLegend() {
+    printSubBanner("列说明");
+    std::cout << "  kind   REF=参考基准  SAME=应与baseline逐像素一致  FAST=更快但结果不同  APRX=近似算法\n";
+    std::cout << "  ok     PASS=达到该路径的质量阈值  FAIL=未达到\n";
+    std::cout << "  计时   " << kWarmupRuns << " 次预热 + " << kMeasureRuns << " 次采样，取 avg/min/max\n";
 }
 
 }  // namespace
 
 int runBenchmark() {
-  std::cout << "OpenCV " << CV_VERSION << "\n";
-  std::cout << "=== seamlessClone benchmark (NORMAL_CLONE) ===\n";
+    printBanner("seamlessClone Benchmark (NORMAL_CLONE)");
 
-  const BenchCase bench = makeUserCase();
-  std::cout << "case: src=" << bench.src.cols << "x" << bench.src.rows
-            << " dst=" << bench.dst.cols << "x" << bench.dst.rows
-            << " mask=" << bench.mask.cols << "x" << bench.mask.rows << " center=("
-            << bench.center.x << "," << bench.center.y << ")"
-            << " solver_px=" << (bench.src.cols * bench.src.rows)
-            << " mask_fg=" << cv::countNonZero(bench.mask) << "\n";
+    const BenchCase bench = makeUserCase();
+    const int maskFg = cv::countNonZero(bench.mask);
+    const int solverPx = solverBoundingRectPixels(bench);
 
-  runAllocExperiment("ellipse_mask", bench);
-  const BenchCase denseBench = makeDenseMaskCase();
-  std::cout << "dense_mask_fg=" << cv::countNonZero(denseBench.mask) << " (app-like)\n";
-  runAllocExperiment("dense_mask_91pct", denseBench);
+    printSubBanner("环境");
+    printKv("OpenCV", CV_VERSION);
+    printKv("CPU threads", std::to_string(cv::getNumThreads()));
+    printKv("OpenCL", isOpenCLPoissonAvailable() ? "yes" : "no");
 
-  std::cout << "--- cold / warmup (baseline only) ---\n";
-  std::cout << "compare cold_first with your app's first seamlessClone call\n";
-  timeBaselineCall("cold_first", bench, runBaselineClone);
+    printSubBanner("测试用例");
+    printKv("src / dst", std::to_string(bench.src.cols) + "x" + std::to_string(bench.src.rows) +
+                            "  CV_8UC3");
+    printKv("mask", "rect(5,5,718,115)  fg=" + std::to_string(maskFg));
+    printKv("center", "(" + std::to_string(bench.center.x) + ", " + std::to_string(bench.center.y) +
+                          ")");
+    printKv("solver bbox", std::to_string(solverPx) + " px  (OpenCV boundingRect(mask))");
+    printKv("Jacobi iters", std::to_string(kJacobiIterations));
 
-  const auto baselineOnce = [&](cv::Mat& tmp) { runBaselineClone(bench, tmp); };
+    cv::Mat baselineOut;
+    runBaselineClone(bench, baselineOut);
 
-  std::cout << "--- timing (5 runs, NO warmup; 1 prior call = cold_first) ---\n";
-  const TimingStats baselineNoWarm =
-      measureMs(0, 5, [&]() {
-        cv::Mat tmp;
-        baselineOnce(tmp);
-      });
-  printStats("baseline", baselineNoWarm);
+    PooledCloneContext pool;
+    pool.srcBuf.create(bench.src.size(), bench.src.type());
+    pool.dstBuf.create(bench.dst.size(), bench.dst.type());
+    pool.maskBuf.create(bench.mask.size(), bench.mask.type());
+    pool.outBuf.create(bench.dst.size(), bench.dst.type());
 
-  double warmupTotal = 0.0;
-  constexpr int kWarmupRuns = 2;
-  for (int i = 0; i < kWarmupRuns; ++i) {
-    double ms = 0.0;
-    cv::Mat out;
-    timeOnce([&]() { runBaselineClone(bench, out); }, ms);
-    warmupTotal += ms;
-    std::cout << std::fixed << std::setprecision(2) << "warmup[" << (i + 1) << "]: " << ms
-              << " ms\n";
-  }
-  std::cout << std::fixed << std::setprecision(2) << "warmup_total: " << warmupTotal << " ms\n";
+    cv::Mat preallocOut;
+    preallocOut.create(bench.dst.size(), bench.dst.type());
 
-  std::cout << "--- timing (5 runs after 2 warmup above) ---\n";
-  const TimingStats baselineWarm =
-      measureMs(0, 5, [&]() {
-        cv::Mat tmp;
-        baselineOnce(tmp);
-      });
-  printStats("baseline", baselineWarm);
+    std::vector<Variant> variants;
+    variants.push_back({"baseline", VariantKind::Reference,
+                         [&](cv::Mat& out) { runBaselineClone(bench, out); }, 100.0, 0.0,
+                         "矩形 mask，OpenCV 默认路径"});
+    variants.push_back(
+        {"prealloc_out", VariantKind::Identical,
+         [&](cv::Mat& out) {
+             runPreallocOutClone(bench, preallocOut);
+             out = preallocOut;
+         },
+         100.0, 0.0, "预先 create 输出 Mat"});
+    variants.push_back({"pooled_reuse", VariantKind::Identical,
+                        [&](cv::Mat& out) { runPooledClone(pool, bench, out); }, 100.0, 0.0,
+                        "复用 src/dst/mask/out buffer"});
 
-  std::cout << "--- correctness (after timing) ---\n";
-  cv::Mat baselineOut;
-  runBaselineClone(bench, baselineOut);
+    for (int threads : {1, 2, 4, 8}) {
+        variants.push_back({"threads_" + std::to_string(threads), VariantKind::Identical,
+                            [&, threads](cv::Mat& out) { runBaselineCloneThreads(bench, out, threads); },
+                            100.0, 0.0, "cv::setNumThreads 扫描"});
+    }
 
-  cv::Mat pooledOut;
-  PooledCloneContext ctx;
-  ctx.srcBuf.create(bench.src.size(), bench.src.type());
-  ctx.dstBuf.create(bench.dst.size(), bench.dst.type());
-  ctx.maskBuf.create(bench.mask.size(), bench.mask.type());
-  ctx.outBuf.create(bench.dst.size(), bench.dst.type());
-  runPooledClone(ctx, bench, pooledOut);
+    variants.push_back({"full_mask", VariantKind::Fast,
+                        [&](cv::Mat& out) { runFullMaskClone(bench, out); }, 42.0, 6.0,
+                        "mask 全 255，solver bbox 更大但 FFT 更快"});
+    variants.push_back({"full_mask_border_paste5", VariantKind::Fast,
+                        [&](cv::Mat& out) { runFullMaskBorderPasteClone(bench, out, 5); }, 42.0, 6.0,
+                        "满 mask clone 后贴回 5px 边框"});
+    variants.push_back({"aligned_736x128", VariantKind::Fast,
+                        [&](cv::Mat& out) { runAlignedClone(bench, out, 32); }, 42.0, 6.0,
+                        "pad 到 736x128"});
+    variants.push_back({"half_res", VariantKind::Fast,
+                        [&](cv::Mat& out) { runHalfResClone(bench, out); }, 28.0, 25.0,
+                        "半分辨率求解后放大"});
+    variants.push_back({"jacobi_cpu", VariantKind::Approx,
+                        [&](cv::Mat& out) { runJacobiPoissonClone(bench, out, kJacobiIterations, false); },
+                        28.0, 25.0, "CPU Jacobi Poisson（GPU 同类算法）"});
 
-  cv::Mat alignedOut;
-  runAlignedClone(bench, alignedOut, 32);
+    if (isOpenCLPoissonAvailable()) {
+        variants.push_back({"jacobi_opencl", VariantKind::Approx,
+                            [&](cv::Mat& out) {
+                                runJacobiPoissonClone(bench, out, kJacobiIterations, true);
+                            },
+                            28.0, 25.0, "OpenCL Jacobi Poisson"});
+    }
 
-  cv::Mat halfOut;
-  runHalfResClone(bench, halfOut);
+    std::vector<VariantResult> results;
+    results.reserve(variants.size());
 
-  const CompareResult pooledCmp = compareImages(baselineOut, pooledOut, 100.0, 0.0);
-  const CompareResult alignedCmp = compareImages(baselineOut, alignedOut, 42.0, 6.0);
-  const CompareResult halfCmp = compareImages(baselineOut, halfOut, 28.0, 25.0);
+    double baselineAvgMs = 0.0;
+    for (const Variant& v : variants) {
+        VariantResult row;
+        row.variant = v;
+        row.stats = timeVariant(v);
 
-  printCompare("pooled_reuse", pooledCmp, "must be identical");
-  printCompare("aligned_736x128", alignedCmp, "FFT-friendly pad, near-identical");
-  printCompare("half_res", halfCmp, "approximate fast path");
+        if (v.name != "baseline") {
+            cv::Mat out;
+            v.run(out);
+            row.compare = compareImages(baselineOut, out, v.psnrThreshold, v.maxDiffThreshold);
+            row.hasCompare = true;
+        }
 
-  std::cout << "--- timing other paths (2 warmup + 5 runs) ---\n";
-  const TimingStats pooledStats =
-      measureMs(kWarmupRuns, 5, [&]() {
-        cv::Mat tmp;
-        runPooledClone(ctx, bench, tmp);
-      });
-  const TimingStats alignedStats =
-      measureMs(kWarmupRuns, 5, [&]() {
-        cv::Mat tmp;
-        runAlignedClone(bench, tmp, 32);
-      });
-  const TimingStats halfStats =
-      measureMs(kWarmupRuns, 5, [&]() {
-        cv::Mat tmp;
-        runHalfResClone(bench, tmp);
-      });
+        if (v.name == "baseline") {
+            baselineAvgMs = row.stats.avgMs;
+        }
+        results.push_back(row);
+    }
 
-  printStats("pooled_reuse", pooledStats);
-  printStats("aligned_736x128", alignedStats);
-  printStats("half_res", halfStats);
+    printLegend();
+    printSubBanner("结果总表（baseline = 矩形 mask）");
+    printResultTableHeader();
 
-  const double speedupAligned = baselineWarm.avgMs / std::max(alignedStats.avgMs, 1e-6);
-  const double speedupHalf = baselineWarm.avgMs / std::max(halfStats.avgMs, 1e-6);
-  std::cout << "speedup aligned: " << speedupAligned << "x\n";
-  std::cout << "speedup half_res: " << speedupHalf << "x\n";
+    bool identicalPass = true;
+    for (const VariantResult& row : results) {
+        const double speedup =
+            (row.variant.name == "baseline")
+                ? 1.0
+                : baselineAvgMs / std::max(row.stats.avgMs, 1e-6);
 
-  const bool allRequiredPass = pooledCmp.pass && alignedCmp.pass;
-  std::cout << "=== overall: " << (allRequiredPass ? "PASS" : "FAIL") << " ===\n";
-  return allRequiredPass ? 0 : 1;
+        printResultRow(row.variant.name.c_str(), kindLabel(row.variant.kind), row.stats, speedup,
+                       row.hasCompare ? &row.compare : nullptr, row.hasCompare);
+
+        if (row.variant.kind == VariantKind::Identical && row.hasCompare && !row.compare.pass) {
+            identicalPass = false;
+        }
+    }
+
+    printSubBanner("路径说明");
+    for (const VariantResult& row : results) {
+        if (row.variant.name == "baseline") {
+            continue;
+        }
+        printNote(row.variant.name.c_str(), row.variant.note);
+    }
+
+    printSubBanner("补充：仅改 mask 为满 mask");
+    cv::Mat fullOut;
+    double fullMs = 0.0;
+    timeOnce([&]() { runFullMaskClone(bench, fullOut); }, fullMs);
+    const CompareResult fullVsRect = compareImages(baselineOut, fullOut, 42.0, 6.0);
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "  full_mask (同 src/dst):  " << fullMs << " ms"
+              << "   vs baseline " << baselineAvgMs << " ms"
+              << "   speedup " << (baselineAvgMs / std::max(fullMs, 1e-6)) << "x\n";
+    std::cout << "  quality vs rect mask:    PSNR=" << fullVsRect.psnr
+              << " dB   maxDiff=" << fullVsRect.maxAbsDiff << "   "
+              << (fullVsRect.pass ? "PASS" : "FAIL") << "\n";
+
+    printBanner(identicalPass ? "SAME paths: PASS" : "SAME paths: FAIL");
+    std::cout << "  SAME 类路径要求 maxDiff=0（prealloc / pooled / threads）\n\n";
+
+    return identicalPass ? 0 : 1;
 }

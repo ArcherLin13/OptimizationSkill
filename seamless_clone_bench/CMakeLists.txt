@@ -8,13 +8,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(USE_DEVICE_OPENCV "Link OpenCV from OPENCV_DEVICE_DIR folder" ON)
 set(OPENCV_DEVICE_DIR "${CMAKE_SOURCE_DIR}/opencv" CACHE PATH "Folder with device OpenCV libs and headers")
 
-set(OPENCV_DEVICE_MODULES core imgcodecs imgproc photo)
+set(OPENCV_DEVICE_MODULES core imgproc photo)
 
 add_executable(seamless_clone_bench
   src/main.cpp
   src/benchmark.cpp
+  src/bench_case.cpp
+  src/image_io.cpp
   src/optimized_clone.cpp
+  src/poisson_jacobi.cpp
+  src/visual_export.cpp
 )
+
+if(UNIX)
+  target_link_libraries(seamless_clone_bench PRIVATE dl)
+endif()
 
 target_include_directories(seamless_clone_bench PRIVATE src)
 
