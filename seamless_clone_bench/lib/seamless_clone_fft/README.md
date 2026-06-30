@@ -16,7 +16,7 @@ ctx.seamlessClone(src, dst, mask, center, output);
 ## What makes ~100ms
 
 1. **`cv::merge` + `cv::dft` + `cv::split`** DST path (faster than manual complex fill on device)
-2. **`cv::parallel_for_` over 3 RGB channels** with `cv::setNumThreads(n/3)` per channel
+2. **`cv::parallel_for_` over 3 RGB channels** — uses `min(getNumThreads(), 3)` for the outer pool (not `n/3`; with 4 threads `n/3` would serialize channels)
 3. Context buffer reuse + NEON prep/eigen/clamp
 
 Do **not** replace `cv::dft` with third-party FFT (breaks maxDiff=0).

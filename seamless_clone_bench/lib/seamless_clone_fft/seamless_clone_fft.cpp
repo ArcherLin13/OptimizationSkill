@@ -398,9 +398,12 @@ private:
 
         // Poisson solve is per-channel; each channel has private DST buffers. Run 3 channels in
         // parallel — this is where ~90% of time is spent (cv::dft inside DST).
+        //
+        // Do NOT use savedThreads/3 here: with getNumThreads()==4 that becomes 1 and forces
+        // serial 3-channel DST (~360ms). Row-wise cv::dft rarely needs inner parallelism.
         const int savedThreads = cv::getNumThreads();
-        const int perChannelThreads = std::max(1, savedThreads / 3);
-        cv::setNumThreads(perChannelThreads);
+        const int poolForChannels = std::min(savedThreads, 3);
+        cv::setNumThreads(std::max(1, poolForChannels));
 
         cv::parallel_for_(cv::Range(0, 3), [&](const cv::Range& range) {
             for (int chan = range.start; chan < range.end; ++chan) {
