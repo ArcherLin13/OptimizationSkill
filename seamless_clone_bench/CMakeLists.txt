@@ -17,14 +17,11 @@ add_executable(seamless_clone_bench
   src/image_io.cpp
   src/optimized_clone.cpp
   src/poisson_jacobi.cpp
+  lib/seamless_clone_jacobi/seamless_clone_jacobi.cpp
   src/visual_export.cpp
 )
 
-if(UNIX)
-  target_link_libraries(seamless_clone_bench PRIVATE dl)
-endif()
-
-target_include_directories(seamless_clone_bench PRIVATE src)
+target_include_directories(seamless_clone_bench PRIVATE src lib/seamless_clone_jacobi)
 
 function(find_opencv_module_lib out_var module_name)
   set(_search_dirs

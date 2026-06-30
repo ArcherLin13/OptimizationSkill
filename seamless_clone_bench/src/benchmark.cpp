@@ -16,7 +16,6 @@ namespace {
 
 constexpr int kWarmupRuns = 2;
 constexpr int kMeasureRuns = 5;
-constexpr int kJacobiIterations = 400;
 
 enum class VariantKind { Reference, Identical, Fast, Approx };
 
@@ -79,7 +78,6 @@ int runBenchmark(const BenchCase& bench) {
     printSubBanner("Environment");
     printKv("OpenCV", CV_VERSION);
     printKv("CPU threads", std::to_string(cv::getNumThreads()));
-    printKv("OpenCL", isOpenCLPoissonAvailable() ? "yes" : "no");
 
     printSubBanner("Test case");
     printKv("src / dst", std::to_string(bench.src.cols) + "x" + std::to_string(bench.src.rows) +
@@ -88,7 +86,7 @@ int runBenchmark(const BenchCase& bench) {
     printKv("center", "(" + std::to_string(bench.center.x) + ", " + std::to_string(bench.center.y) +
                           ")");
     printKv("solver bbox", std::to_string(solverPx) + " px  (OpenCV boundingRect(mask))");
-    printKv("Jacobi iters", std::to_string(kJacobiIterations));
+    printKv("Jacobi iters", "400 (jacobi_cpu)");
 
     cv::Mat baselineOut;
     runBaselineClone(bench, baselineOut);
@@ -136,16 +134,8 @@ int runBenchmark(const BenchCase& bench) {
                         [&](cv::Mat& out) { runHalfResClone(bench, out); }, 28.0, 25.0,
                         "half-res solve then upscale"});
     variants.push_back({"jacobi_cpu", VariantKind::Approx,
-                        [&](cv::Mat& out) { runJacobiPoissonClone(bench, out, kJacobiIterations, false); },
-                        28.0, 25.0, "CPU Jacobi Poisson (same family as GPU path)"});
-
-    if (isOpenCLPoissonAvailable()) {
-        variants.push_back({"jacobi_opencl", VariantKind::Approx,
-                            [&](cv::Mat& out) {
-                                runJacobiPoissonClone(bench, out, kJacobiIterations, true);
-                            },
-                            28.0, 25.0, "OpenCL Jacobi Poisson"});
-    }
+                        [&](cv::Mat& out) { runJacobiPoissonClone(bench, out, 400); }, 28.0, 25.0,
+                        "CPU Jacobi Poisson, 400 iters"});
 
     std::vector<VariantResult> results;
     results.reserve(variants.size());

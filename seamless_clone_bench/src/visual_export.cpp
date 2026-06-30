@@ -17,7 +17,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr int kJacobiIterations = 400;
 constexpr int kTileScale = 3;
 
 std::string joinPath(const std::string& dir, const std::string& name) {
@@ -149,13 +148,8 @@ int runVisualExport(const BenchCase& bench, const std::string& exportDir) {
     runHalfResClone(bench, out);
     addVariant(entries, "09_half_res", "half_res", out, baselineRef);
 
-    runJacobiPoissonClone(bench, out, kJacobiIterations, false);
+    runJacobiPoissonClone(bench, out, 400);
     addVariant(entries, "10_jacobi_cpu", "jacobi_cpu", out, baselineRef);
-
-    if (isOpenCLPoissonAvailable()) {
-        runJacobiPoissonClone(bench, out, kJacobiIterations, true);
-        addVariant(entries, "11_jacobi_opencl", "jacobi_opencl", out, baselineRef);
-    }
 
     int written = 0;
     printBanner("Visual Export");

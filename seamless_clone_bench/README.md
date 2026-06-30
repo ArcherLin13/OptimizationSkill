@@ -110,26 +110,22 @@ ls out/
 
 ## 在业务代码里替换 seamlessClone
 
-Jacobi CPU 路径已封装为 drop-in API（**不需要** `opencv_photo`）：
+拷贝整个文件夹到你的工程：
+
+```text
+seamless_clone_bench/lib/seamless_clone_jacobi/
+  seamless_clone_jacobi.h
+  seamless_roi.h
+  seamless_clone_jacobi.cpp
+  README.md
+```
 
 ```cpp
 #include "seamless_clone_jacobi.h"
-
-// 原来:
-// cv::seamlessClone(src, dst, mask, center, output, cv::NORMAL_CLONE);
-
-// 替换为 (~3x faster, approximate):
 seamless_clone_jacobi::seamlessClone(src, dst, mask, center, output);
-// 可选: 最后一参 iterations，默认 400
 ```
 
-拷贝这 3 个文件到你的工程并链接 `poisson_jacobi.cpp`：
-
-- `src/seamless_clone_jacobi.h` — 对外 API
-- `src/seamless_roi.h` — ROI 预处理（header-only）
-- `src/poisson_jacobi.cpp` — 实现（Linux/OHOS 需链接 `dl`）
-
-依赖：OpenCV **core + imgproc** 即可。
+仅依赖 OpenCV **core + imgproc**，无 OpenCL、无 `opencv_photo`、无 `dl`。
 
 默认 **不再** 需要 `build_opencv.ps1`。若要用自编的 OpenCV 4.9：
 
