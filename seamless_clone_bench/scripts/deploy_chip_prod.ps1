@@ -52,7 +52,7 @@ Write-Host "Device OpenCV libs in $DeviceLibDir :"
 & $Hdc file send $ExePath "$RemoteDir/seamless_clone_bench"
 
 Write-Host "Running with LD_LIBRARY_PATH=$DeviceLibDir ..."
-& $Hdc shell "cd $RemoteDir && chmod +x seamless_clone_bench && export LD_LIBRARY_PATH=$DeviceLibDir:`$LD_LIBRARY_PATH && ./seamless_clone_bench --export $RemoteDir/out"
+& $Hdc shell "cd $RemoteDir && chmod +x seamless_clone_bench && export LD_LIBRARY_PATH=$DeviceLibDir:`$LD_LIBRARY_PATH && ./seamless_clone_bench --export $RemoteDir/out && ls -la $RemoteDir/out"
 Write-Host ""
 Write-Host "Images on device: $RemoteDir/out/"
 Write-Host "Pull to PC:       .\scripts\pull_results.ps1"

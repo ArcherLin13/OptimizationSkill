@@ -211,7 +211,8 @@ int runBenchmark() {
               << (fullVsRect.pass ? "PASS" : "FAIL") << "\n";
 
     printBanner(identicalPass ? "SAME paths: PASS" : "SAME paths: FAIL");
-    std::cout << "  SAME paths require maxDiff=0 (prealloc / pooled / threads)\n\n";
+    std::cout << "  SAME paths require maxDiff=0 (prealloc / pooled / threads)\n";
+    std::cout << "  Images are written after this table (see Visual Export section).\n\n";
 
     return identicalPass ? 0 : 1;
 }

@@ -11,16 +11,17 @@ namespace {
 
 struct Options {
     bool runBench = true;
-    bool runExport = false;
+    bool runExport = true;
     std::string exportDir = "/data/local/tmp/seamless_clone_bench/out";
     std::string imageDir;
 };
 
 void printUsage() {
     std::cout << "Usage:\n"
-              << "  seamless_clone_bench                     # timing benchmark only\n"
-              << "  seamless_clone_bench --export [DIR]      # benchmark + save images\n"
-              << "  seamless_clone_bench --visual [DIR]      # save images only\n"
+              << "  seamless_clone_bench                     # benchmark + save images (default)\n"
+              << "  seamless_clone_bench --bench-only        # timing only, no images\n"
+              << "  seamless_clone_bench --export [DIR]      # benchmark + save images to DIR\n"
+              << "  seamless_clone_bench --visual [DIR]      # save images only (no timing)\n"
               << "  seamless_clone_bench --images DIR ...    # use DIR/src.bmp dst.bmp mask.bmp\n"
               << "\n"
               << "Examples:\n"

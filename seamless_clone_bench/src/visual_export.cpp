@@ -95,15 +95,15 @@ void addVariant(std::vector<VisualExportEntry>& entries, const std::string& stem
     VisualExportEntry entry;
     entry.fileStem = stem;
     entry.title = title;
-    entry.image = image;
-    if (!baseline.empty() && !image.empty()) {
+    entry.image = image.clone();
+    if (!baseline.empty() && !entry.image.empty()) {
         cv::Mat diff;
-        cv::absdiff(baseline, image, diff);
+        cv::absdiff(baseline, entry.image, diff);
         double maxDiff = 0.0;
         cv::minMaxLoc(diff, nullptr, &maxDiff);
         entry.maxDiffVsBaseline = maxDiff;
     }
-    entries.push_back(entry);
+    entries.push_back(std::move(entry));
 }
 
 }  // namespace
@@ -122,38 +122,39 @@ int runVisualExport(const BenchCase& bench, const std::string& exportDir) {
 
     cv::Mat baseline;
     runBaselineClone(bench, baseline);
+    const cv::Mat baselineRef = baseline.clone();
 
     std::vector<VisualExportEntry> entries;
     addVariant(entries, "00_src", "src", bench.src, cv::Mat());
     addVariant(entries, "01_dst", "dst", bench.dst, cv::Mat());
     addVariant(entries, "02_mask", "mask", colorizeMask(bench.mask), cv::Mat());
-    addVariant(entries, "03_baseline", "baseline", baseline, cv::Mat());
+    addVariant(entries, "03_baseline", "baseline", baselineRef, cv::Mat());
 
     cv::Mat out;
     runPreallocOutClone(bench, preallocOut);
-    addVariant(entries, "04_prealloc_out", "prealloc_out", preallocOut, baseline);
+    addVariant(entries, "04_prealloc_out", "prealloc_out", preallocOut, baselineRef);
 
     runPooledClone(pool, bench, out);
-    addVariant(entries, "05_pooled_reuse", "pooled_reuse", out, baseline);
+    addVariant(entries, "05_pooled_reuse", "pooled_reuse", out, baselineRef);
 
     runFullMaskClone(bench, out);
-    addVariant(entries, "06_full_mask", "full_mask", out, baseline);
+    addVariant(entries, "06_full_mask", "full_mask", out, baselineRef);
 
     runFullMaskBorderPasteClone(bench, out, 5);
-    addVariant(entries, "07_full_mask_border_paste5", "full_mask_border_paste5", out, baseline);
+    addVariant(entries, "07_full_mask_border_paste5", "full_mask_border_paste5", out, baselineRef);
 
     runAlignedClone(bench, out, 32);
-    addVariant(entries, "08_aligned_736x128", "aligned_736x128", out, baseline);
+    addVariant(entries, "08_aligned_736x128", "aligned_736x128", out, baselineRef);
 
     runHalfResClone(bench, out);
-    addVariant(entries, "09_half_res", "half_res", out, baseline);
+    addVariant(entries, "09_half_res", "half_res", out, baselineRef);
 
     runJacobiPoissonClone(bench, out, kJacobiIterations, false);
-    addVariant(entries, "10_jacobi_cpu", "jacobi_cpu", out, baseline);
+    addVariant(entries, "10_jacobi_cpu", "jacobi_cpu", out, baselineRef);
 
     if (isOpenCLPoissonAvailable()) {
         runJacobiPoissonClone(bench, out, kJacobiIterations, true);
-        addVariant(entries, "11_jacobi_opencl", "jacobi_opencl", out, baseline);
+        addVariant(entries, "11_jacobi_opencl", "jacobi_opencl", out, baselineRef);
     }
 
     int written = 0;
@@ -186,7 +187,7 @@ int runVisualExport(const BenchCase& bench, const std::string& exportDir) {
             continue;
         }
         resultTiles.push_back(makeTile(entry.image, entry.title, maxDiff));
-        diffTiles.push_back(makeTile(amplifyDiff(baseline, entry.image), "diff " + entry.title, maxDiff));
+        diffTiles.push_back(makeTile(amplifyDiff(baselineRef, entry.image), "diff " + entry.title, maxDiff));
     }
 
     const cv::Mat gridResults = stitchRows(resultTiles, 3);
