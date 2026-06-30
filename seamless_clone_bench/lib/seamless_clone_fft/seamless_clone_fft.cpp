@@ -1,6 +1,8 @@
 // OpenCV 4.9 NORMAL_CLONE + buffer reuse + 3-channel parallel (cv::dft merge path).
 #include "seamless_clone_fft.h"
 
+#include "sc_fft_rows.h"
+
 #include <opencv2/core/utility.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -132,9 +134,20 @@ struct DstScratch {
     cv::Mat complexB;
     cv::Mat planeA1;
     cv::Mat planeB1;
+    bool useNativeDft = false;
+    bool useNeonDft = true;
+
+    void rowDft(cv::Mat& complex, bool invert) {
+        if (useNativeDft) {
+            sc_fft::dftRows32fc2(complex, invert, useNeonDft);
+        } else {
+            const int flag =
+                invert ? cv::DFT_ROWS + cv::DFT_SCALE + cv::DFT_INVERSE : cv::DFT_ROWS;
+            cv::dft(complex, complex, flag);
+        }
+    }
 
     void dstTransform(const cv::Mat& src, cv::Mat& dest, bool invert) {
-        const int flag = invert ? cv::DFT_ROWS + cv::DFT_SCALE + cv::DFT_INVERSE : cv::DFT_ROWS;
         const int rows = src.rows;
         const int cols = src.cols;
 
@@ -161,7 +174,7 @@ struct DstScratch {
         planeA1.setTo(0);
         cv::Mat planesA[] = {tempA, planeA1};
         cv::merge(planesA, 2, complexA);
-        cv::dft(complexA, complexA, flag);
+        rowDft(complexA, invert);
         cv::split(complexA, planesA);
 
         tempB.setTo(0);
@@ -177,7 +190,7 @@ struct DstScratch {
         planeB1.setTo(0);
         cv::Mat planesB[] = {tempB, planeB1};
         cv::merge(planesB, 2, complexB);
-        cv::dft(complexB, complexB, flag);
+        rowDft(complexB, invert);
         cv::split(complexB, planesB);
 
         cv::Mat transposed = planesB[1].t();
@@ -202,6 +215,8 @@ struct ChannelScratch {
 
 struct CloningWorkspace {
     cv::Size size;
+    bool useNativeDft = false;
+    bool useNeonDft = true;
     EigenFilters filters;
     cv::Mat destinationGradientX;
     cv::Mat destinationGradientY;
@@ -217,27 +232,31 @@ struct CloningWorkspace {
     ChannelScratch channel[3];
 
     void ensure(const cv::Size& s) {
-        if (s == size && !destinationGradientX.empty()) {
-            return;
+        const bool sizeChanged = (s != size || destinationGradientX.empty());
+        if (sizeChanged) {
+            size = s;
+            filters = makeFilters(s.width, s.height);
+            destinationGradientX.create(s, CV_32FC3);
+            destinationGradientY.create(s, CV_32FC3);
+            patchGradientX.create(s, CV_32FC3);
+            patchGradientY.create(s, CV_32FC3);
+            binaryMaskFloat.create(s, CV_32FC1);
+            binaryMaskFloatInverted.create(s, CV_32FC1);
+            laplacianX.create(s, CV_32FC3);
+            laplacianY.create(s, CV_32FC3);
+            rgbxChannel.resize(3);
+            rgbyChannel.resize(3);
+            output.resize(3);
+            for (int c = 0; c < 3; ++c) {
+                rgbxChannel[c].create(s, CV_32F);
+                rgbyChannel[c].create(s, CV_32F);
+                output[c].create(s, CV_8UC1);
+                channel[c].ensure(s.width, s.height);
+            }
         }
-        size = s;
-        filters = makeFilters(s.width, s.height);
-        destinationGradientX.create(s, CV_32FC3);
-        destinationGradientY.create(s, CV_32FC3);
-        patchGradientX.create(s, CV_32FC3);
-        patchGradientY.create(s, CV_32FC3);
-        binaryMaskFloat.create(s, CV_32FC1);
-        binaryMaskFloatInverted.create(s, CV_32FC1);
-        laplacianX.create(s, CV_32FC3);
-        laplacianY.create(s, CV_32FC3);
-        rgbxChannel.resize(3);
-        rgbyChannel.resize(3);
-        output.resize(3);
         for (int c = 0; c < 3; ++c) {
-            rgbxChannel[c].create(s, CV_32F);
-            rgbyChannel[c].create(s, CV_32F);
-            output[c].create(s, CV_8UC1);
-            channel[c].ensure(s.width, s.height);
+            channel[c].dst.useNativeDft = useNativeDft;
+            channel[c].dst.useNeonDft = useNeonDft;
         }
     }
 };
@@ -478,6 +497,8 @@ namespace seamless_clone_fft {
 
 struct Context::Impl {
     TopLevelBuffers buffers;
+    bool useNativeDft = false;
+    bool useNeonDft = true;
 };
 
 Context::Context() : impl_(new Impl()) {}
@@ -486,8 +507,15 @@ Context::~Context() {
     impl_ = nullptr;
 }
 
+void Context::setNativeOcvDft(bool enable, bool neonRadix4) {
+    impl_->useNativeDft = enable;
+    impl_->useNeonDft = neonRadix4;
+}
+
 void Context::seamlessClone(const cv::Mat& src, const cv::Mat& dst, const cv::Mat& mask, cv::Point center,
                             cv::Mat& output, int flags) {
+    impl_->buffers.cloning.useNativeDft = impl_->useNativeDft;
+    impl_->buffers.cloning.useNeonDft = impl_->useNeonDft;
     runClone(impl_->buffers, src, dst, mask, center, output, flags);
 }
 

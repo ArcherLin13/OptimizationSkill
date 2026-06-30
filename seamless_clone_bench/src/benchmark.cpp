@@ -4,6 +4,7 @@
 #include "optimized_clone.h"
 #include "poisson_fft.h"
 #include "poisson_jacobi.h"
+#include "sc_dft_verify.h"
 #include "seamless_roi.h"
 #include "timing.h"
 
@@ -89,6 +90,8 @@ int runBenchmark(const BenchCase& bench) {
     printKv("solver bbox", std::to_string(solverPx) + " px  (OpenCV boundingRect(mask))");
     printKv("Jacobi iters", "400 (jacobi_cpu)");
 
+    sc_fft::logDstDftVerify();
+
     cv::Mat baselineOut;
     runBaselineClone(bench, baselineOut);
 
@@ -108,6 +111,12 @@ int runBenchmark(const BenchCase& bench) {
     variants.push_back({"poisson_fft", VariantKind::Identical,
                         [&](cv::Mat& out) { runFftPoissonClone(bench, out); }, 100.0, 0.0,
                         "FFT clone, merge+dft DST + parallel_for 3ch"});
+    variants.push_back({"poisson_fft_ocv_scalar", VariantKind::Identical,
+                        [&](cv::Mat& out) { runFftPoissonNativeClone(bench, out, false); }, 100.0, 0.0,
+                        "native OpenCV DFT port (scalar), no NEON"});
+    variants.push_back({"poisson_fft_ocv_neon", VariantKind::Identical,
+                        [&](cv::Mat& out) { runFftPoissonNativeClone(bench, out, true); }, 100.0, 0.0,
+                        "native OpenCV DFT + ARM NEON radix-4"});
     variants.push_back(
         {"prealloc_out", VariantKind::Identical,
          [&](cv::Mat& out) {
