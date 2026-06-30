@@ -2,6 +2,7 @@
 
 #include "bench_case.h"
 #include "image_io.h"
+#include "jacobi_config.h"
 #include "log_format.h"
 #include "metrics.h"
 #include "poisson_jacobi.h"
@@ -17,7 +18,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr int kJacobiIterations = 400;
 constexpr int kTileScale = 3;
 
 std::string joinPath(const std::string& dir, const std::string& name) {
@@ -149,12 +149,15 @@ int runVisualExport(const BenchCase& bench, const std::string& exportDir) {
     runHalfResClone(bench, out);
     addVariant(entries, "09_half_res", "half_res", out, baselineRef);
 
-    runJacobiPoissonClone(bench, out, kJacobiIterations, false);
-    addVariant(entries, "10_jacobi_cpu", "jacobi_cpu", out, baselineRef);
+    runJacobiPoissonClone(bench, out, kJacobiItersDefault, false);
+    addVariant(entries, "10_jacobi_cpu", "jacobi_cpu x400", out, baselineRef);
+
+    runJacobiPoissonClone(bench, out, kJacobiItersHigh, false);
+    addVariant(entries, "11_jacobi_cpu_800", "jacobi_cpu x800", out, baselineRef);
 
     if (isOpenCLPoissonAvailable()) {
-        runJacobiPoissonClone(bench, out, kJacobiIterations, true);
-        addVariant(entries, "11_jacobi_opencl", "jacobi_opencl", out, baselineRef);
+        runJacobiPoissonClone(bench, out, kJacobiItersDefault, true);
+        addVariant(entries, "12_jacobi_opencl", "jacobi_opencl", out, baselineRef);
     }
 
     int written = 0;

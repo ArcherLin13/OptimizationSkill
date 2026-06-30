@@ -1,4 +1,5 @@
 #include "bench_case.h"
+#include "jacobi_config.h"
 #include "log_format.h"
 #include "metrics.h"
 #include "optimized_clone.h"
@@ -16,7 +17,6 @@ namespace {
 
 constexpr int kWarmupRuns = 2;
 constexpr int kMeasureRuns = 5;
-constexpr int kJacobiIterations = 400;
 
 enum class VariantKind { Reference, Identical, Fast, Approx };
 
@@ -88,7 +88,8 @@ int runBenchmark(const BenchCase& bench) {
     printKv("center", "(" + std::to_string(bench.center.x) + ", " + std::to_string(bench.center.y) +
                           ")");
     printKv("solver bbox", std::to_string(solverPx) + " px  (OpenCV boundingRect(mask))");
-    printKv("Jacobi iters", std::to_string(kJacobiIterations));
+    printKv("Jacobi iters", std::to_string(kJacobiItersDefault) + " (jacobi_cpu), " +
+                          std::to_string(kJacobiItersHigh) + " (jacobi_cpu_800)");
 
     cv::Mat baselineOut;
     runBaselineClone(bench, baselineOut);
@@ -136,13 +137,20 @@ int runBenchmark(const BenchCase& bench) {
                         [&](cv::Mat& out) { runHalfResClone(bench, out); }, 28.0, 25.0,
                         "half-res solve then upscale"});
     variants.push_back({"jacobi_cpu", VariantKind::Approx,
-                        [&](cv::Mat& out) { runJacobiPoissonClone(bench, out, kJacobiIterations, false); },
-                        28.0, 25.0, "CPU Jacobi Poisson (same family as GPU path)"});
+                        [&](cv::Mat& out) {
+                            runJacobiPoissonClone(bench, out, kJacobiItersDefault, false);
+                        },
+                        28.0, 25.0, "CPU Jacobi Poisson, 400 iters"});
+    variants.push_back({"jacobi_cpu_800", VariantKind::Approx,
+                        [&](cv::Mat& out) {
+                            runJacobiPoissonClone(bench, out, kJacobiItersHigh, false);
+                        },
+                        28.0, 25.0, "CPU Jacobi Poisson, 800 iters (~2x time, +~1dB PSNR)"});
 
     if (isOpenCLPoissonAvailable()) {
         variants.push_back({"jacobi_opencl", VariantKind::Approx,
                             [&](cv::Mat& out) {
-                                runJacobiPoissonClone(bench, out, kJacobiIterations, true);
+                                runJacobiPoissonClone(bench, out, kJacobiItersDefault, true);
                             },
                             28.0, 25.0, "OpenCL Jacobi Poisson"});
     }
@@ -208,6 +216,32 @@ int runBenchmark(const BenchCase& bench) {
     std::cout << "  quality vs rect mask:    PSNR=" << fullVsRect.psnr
               << " dB   maxDiff=" << fullVsRect.maxAbsDiff << "   "
               << (fullVsRect.pass ? "PASS" : "FAIL") << "\n";
+
+    printSubBanner("Extra: Jacobi iteration sweep (CPU)");
+    struct JacobiSweepRow {
+        int iters;
+        double ms;
+        CompareResult quality;
+    };
+    std::vector<JacobiSweepRow> jacobiSweep;
+    for (const int iters : {kJacobiItersDefault, kJacobiItersHigh}) {
+        cv::Mat jacobiOut;
+        double ms = 0.0;
+        timeOnce([&]() { runJacobiPoissonClone(bench, jacobiOut, iters, false); }, ms);
+        jacobiSweep.push_back({iters, ms, compareImages(baselineOut, jacobiOut, 28.0, 25.0)});
+    }
+    std::cout << std::fixed << std::setprecision(2);
+    for (const JacobiSweepRow& row : jacobiSweep) {
+        std::cout << "  iters=" << row.iters << ": " << row.ms << " ms"
+                  << "   PSNR=" << row.quality.psnr << " dB"
+                  << "   maxDiff=" << row.quality.maxAbsDiff << "\n";
+    }
+    if (jacobiSweep.size() == 2) {
+        const double psnrGain = jacobiSweep[1].quality.psnr - jacobiSweep[0].quality.psnr;
+        const double timeRatio = jacobiSweep[1].ms / std::max(jacobiSweep[0].ms, 1e-6);
+        std::cout << "  400 -> 800: PSNR +" << psnrGain << " dB, time x" << timeRatio
+                  << " (diminishing returns)\n";
+    }
 
     printBanner(identicalPass ? "SAME paths: PASS" : "SAME paths: FAIL");
     std::cout << "  SAME paths require maxDiff=0 (prealloc / pooled / threads)\n";
