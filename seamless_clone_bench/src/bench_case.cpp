@@ -4,16 +4,42 @@
 #include "seamless_roi.h"
 
 #include <fstream>
+#include <opencv2/imgproc.hpp>
 #include <sstream>
+#include <stdexcept>
+#include <vector>
+
+namespace {
+
+constexpr int kW = 729;
+constexpr int kH = 126;
+const cv::Rect kAppMaskRect(5, 5, 718, 115);
+
+void applyAppMask(BenchCase& bench) {
+    bench.mask = cv::Mat::zeros(kH, kW, CV_8UC1);
+    bench.mask(kAppMaskRect).setTo(255);
+    bench.center = cv::Point(364, 62);
+}
+
+void drawTextLines(cv::Mat& image, const std::vector<std::string>& lines, const cv::Scalar& color,
+                   double scale, int thickness, int y0, int yStep) {
+    int y = y0;
+    for (const std::string& line : lines) {
+        cv::putText(image, line, cv::Point(16, y), cv::FONT_HERSHEY_SIMPLEX, scale, color, thickness,
+                    cv::LINE_AA);
+        y += yStep;
+    }
+}
+
+}  // namespace
 
 BenchCase makeVisualBenchCase() {
     BenchCase bench;
-    bench.src = cv::Mat(126, 729, CV_8UC3);
-    bench.dst = cv::Mat(126, 729, CV_8UC3);
-    bench.mask = cv::Mat::zeros(126, 729, CV_8UC1);
-    bench.center = cv::Point(364, 62);
+    bench.src = cv::Mat(kH, kW, CV_8UC3);
+    bench.dst = cv::Mat(kH, kW, CV_8UC3);
+    applyAppMask(bench);
 
-    for (int y = 0; y < bench.src.rows; ++y) {
+    for (int y = 0; y < kH; ++y) {
         for (int x = 0; x < bench.src.cols; ++x) {
             const uchar dstB = static_cast<uchar>((x * 255) / std::max(1, bench.src.cols - 1));
             const uchar dstG = static_cast<uchar>(40 + (y * 160) / std::max(1, bench.src.rows - 1));
@@ -26,8 +52,46 @@ BenchCase makeVisualBenchCase() {
         }
     }
 
-    bench.mask(cv::Rect(5, 5, 718, 115)).setTo(255);
     return bench;
+}
+
+BenchCase makeTextBenchCase() {
+    BenchCase bench;
+    bench.src = cv::Mat(kH, kW, CV_8UC3, cv::Scalar(210, 230, 255));
+    bench.dst = cv::Mat(kH, kW, CV_8UC3, cv::Scalar(90, 40, 25));
+    applyAppMask(bench);
+
+    drawTextLines(bench.dst,
+                  {"BACKGROUND 729x126", "DST: ABCD EFGH IJKL MNOP QRST", "harmony seamless clone test"},
+                  cv::Scalar(235, 235, 235), 0.55, 1, 34, 36);
+    drawTextLines(bench.src,
+                  {"SOURCE PATCH CLONE", "SRC: 0123456789 9876543210", "glyph edge sharpness check"},
+                  cv::Scalar(20, 20, 160), 0.55, 2, 34, 36);
+
+  // Fine serif-like stress: small digits along the bottom.
+    for (int x = 20; x < kW - 20; x += 54) {
+        cv::putText(bench.dst, "8gQy", cv::Point(x, 118), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.55,
+                    cv::Scalar(200, 200, 120), 1, cv::LINE_AA);
+        cv::putText(bench.src, "6pZj", cv::Point(x, 118), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.55,
+                    cv::Scalar(180, 60, 20), 1, cv::LINE_AA);
+    }
+
+    return bench;
+}
+
+BenchCase makeBenchCaseByName(const std::string& name) {
+    if (name == "visual" || name == "pattern") {
+        return makeVisualBenchCase();
+    }
+    if (name == "text") {
+        return makeTextBenchCase();
+    }
+    throw std::runtime_error("unknown --case: " + name + " (use visual or text)");
+}
+
+bool saveBenchCaseToDir(const BenchCase& bench, const std::string& dir) {
+    return saveImageFile(dir + "/src.bmp", bench.src) && saveImageFile(dir + "/dst.bmp", bench.dst) &&
+           saveImageFile(dir + "/mask.bmp", bench.mask);
 }
 
 bool loadBenchCaseFromDir(const std::string& dir, BenchCase& bench, std::string& error) {

@@ -2,7 +2,7 @@
 param(
     [string]$OhosNative = "",
     [string]$ExePath = "",
-    [string]$RemoteDir = "/data/local/tmp/seamless_clone_bench",
+    [string]$RemoteDir = "/data/vendor/camera",
     [string]$DeviceLibDir = "/chip_prod/lib64"
 )
 
@@ -12,11 +12,13 @@ $Root = Split-Path -Parent $PSScriptRoot
 $cfg = & (Join-Path $PSScriptRoot "load_config.ps1") @{
     OhosNative = $OhosNative
     DeviceLibDir = $DeviceLibDir
+    RemoteDir = $RemoteDir
 }
 $OhosNative = if ($cfg.OhosNative) { $cfg.OhosNative } else {
     "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"
 }
 if ($cfg.DeviceLibDir) { $DeviceLibDir = $cfg.DeviceLibDir }
+if ($cfg.RemoteDir) { $RemoteDir = $cfg.RemoteDir }
 
 $Hdc = Join-Path (Split-Path $OhosNative -Parent) "toolchains\hdc.exe"
 
@@ -51,8 +53,8 @@ Write-Host "Device OpenCV libs in $DeviceLibDir :"
 & $Hdc shell "mkdir -p $RemoteDir/out"
 & $Hdc file send $ExePath "$RemoteDir/seamless_clone_bench"
 
-Write-Host "Running with LD_LIBRARY_PATH=$DeviceLibDir ..."
-& $Hdc shell "cd $RemoteDir && chmod +x seamless_clone_bench && export LD_LIBRARY_PATH=$DeviceLibDir:`$LD_LIBRARY_PATH && ./seamless_clone_bench --export $RemoteDir/out && ls -la $RemoteDir/out"
+Write-Host "Running with LD_LIBRARY_PATH=$DeviceLibDir (images -> $RemoteDir/out) ..."
+& $Hdc shell "cd $RemoteDir && chmod +x seamless_clone_bench && export LD_LIBRARY_PATH=$DeviceLibDir:`$LD_LIBRARY_PATH && ./seamless_clone_bench && ls -la out"
 Write-Host ""
 Write-Host "Images on device: $RemoteDir/out/"
 Write-Host "Pull to PC:       .\scripts\pull_results.ps1"

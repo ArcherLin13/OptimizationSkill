@@ -70,10 +70,9 @@ void printLegend() {
 
 }  // namespace
 
-int runBenchmark() {
+int runBenchmark(const BenchCase& bench) {
     printBanner("seamlessClone Benchmark (NORMAL_CLONE)");
 
-    const BenchCase bench = makeUserCase();
     const int maskFg = cv::countNonZero(bench.mask);
     const int solverPx = solverBoundingRectPixels(bench);
 

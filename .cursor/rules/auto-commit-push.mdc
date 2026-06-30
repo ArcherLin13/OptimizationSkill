@@ -1,0 +1,16 @@
+---
+description: Auto commit and push after completing code changes in this repo
+alwaysApply: true
+---
+
+# Auto commit and push
+
+After finishing a task that changes tracked files in this repository:
+
+1. Commit the changes without asking the user for confirmation.
+2. Push to the tracked remote branch (usually `origin/master`) without asking.
+3. Do not ask "should I commit?" or "should I push?" — just do it.
+
+Follow the git safety protocol: no force push to main/master, no amending pushed commits, no skipping hooks unless the user explicitly requests it.
+
+If commit or push fails, fix the issue and retry; report the final commit hash and remote status briefly.

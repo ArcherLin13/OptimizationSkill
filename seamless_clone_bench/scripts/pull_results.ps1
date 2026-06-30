@@ -1,7 +1,7 @@
 # Pull visual export images from phone to ./results/
 param(
     [string]$OhosNative = "",
-    [string]$RemoteDir = "/data/local/tmp/seamless_clone_bench/out",
+    [string]$RemoteDir = "",
     [string]$LocalDir = ""
 )
 
@@ -11,9 +11,18 @@ if ([string]::IsNullOrWhiteSpace($LocalDir)) {
     $LocalDir = Join-Path $Root "results"
 }
 
-$cfg = & (Join-Path $PSScriptRoot "load_config.ps1") @{ OhosNative = $OhosNative }
+$cfg = & (Join-Path $PSScriptRoot "load_config.ps1") @{
+    OhosNative = $OhosNative
+    RemoteDir = $RemoteDir
+}
 $OhosNative = if ($cfg.OhosNative) { $cfg.OhosNative } else {
     "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"
+}
+if ($cfg.RemoteDir) {
+    $RemoteDir = if ($cfg.RemoteDir -match "/out$") { $cfg.RemoteDir } else { "$($cfg.RemoteDir)/out" }
+}
+if ([string]::IsNullOrWhiteSpace($RemoteDir)) {
+    $RemoteDir = "/data/vendor/camera/out"
 }
 $Hdc = Join-Path (Split-Path $OhosNative -Parent) "toolchains\hdc.exe"
 if (-not (Test-Path $Hdc)) {

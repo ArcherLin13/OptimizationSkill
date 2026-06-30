@@ -21,4 +21,8 @@ if ($Vars.ContainsKey("DeviceLibDir") -and [string]::IsNullOrWhiteSpace($Vars.De
     if ($script:DEVICE_LIB_DIR) { $Vars.DeviceLibDir = $script:DEVICE_LIB_DIR }
 }
 
+if ($Vars.ContainsKey("RemoteDir") -and [string]::IsNullOrWhiteSpace($Vars.RemoteDir)) {
+    if ($script:REMOTE_DIR) { $Vars.RemoteDir = $script:REMOTE_DIR }
+}
+
 return $Vars

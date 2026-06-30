@@ -88,6 +88,26 @@ llvm\bin\clang++.exe
 .\scripts\deploy_chip_prod.ps1
 ```
 
+设备目录（默认）：
+
+```text
+/data/vendor/camera/
+  seamless_clone_bench    # 可执行文件
+  out/                    # 对比图输出（grid_results.bmp 等）
+  case/                   # push_case 推送的测试图（可选）
+```
+
+在设备上手动运行（图片写入 `./out/`）：
+
+```bash
+cd /data/vendor/camera
+export LD_LIBRARY_PATH=/chip_prod/lib64:$LD_LIBRARY_PATH
+./seamless_clone_bench --case text
+ls out/
+```
+
+拉回 PC：`.\scripts\pull_results.ps1`（默认拉 `/data/vendor/camera/out`）
+
 默认 **不再** 需要 `build_opencv.ps1`。若要用自编的 OpenCV 4.9：
 
 ```powershell

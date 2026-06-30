@@ -2,12 +2,21 @@
 param(
     [string]$OhosNative = "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native",
     [string]$OpenCvOhosDir = "",
-    [string]$RemoteDir = "/data/local/tmp/seamless_clone_bench"
+    [string]$RemoteDir = "/data/vendor/camera"
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $Root "build\ohos-arm64"
+
+$cfg = & (Join-Path $PSScriptRoot "load_config.ps1") @{
+    OhosNative = $OhosNative
+    RemoteDir = $RemoteDir
+}
+$OhosNative = if ($cfg.OhosNative) { $cfg.OhosNative } else {
+    "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"
+}
+if ($cfg.RemoteDir) { $RemoteDir = $cfg.RemoteDir }
 $Hdc = Join-Path (Split-Path $OhosNative -Parent) "toolchains\hdc.exe"
 
 if ([string]::IsNullOrWhiteSpace($OpenCvOhosDir)) {
@@ -23,7 +32,7 @@ if (-not (Test-Path $Hdc)) {
     throw "hdc not found: $Hdc"
 }
 
-& $Hdc shell "mkdir -p $RemoteDir"
+& $Hdc shell "mkdir -p $RemoteDir/out"
 & $Hdc file send $Exe "$RemoteDir/seamless_clone_bench"
 
 $LibDir = Join-Path $OpenCvOhosDir "lib"
@@ -36,5 +45,8 @@ if (Test-Path $CppShared) {
     & $Hdc file send $CppShared "$RemoteDir/libc++_shared.so"
 }
 
-Write-Host "Running on device ..."
-& $Hdc shell "cd $RemoteDir && chmod +x seamless_clone_bench && export LD_LIBRARY_PATH=$RemoteDir:`$LD_LIBRARY_PATH && ./seamless_clone_bench"
+Write-Host "Running on device (images -> $RemoteDir/out) ..."
+& $Hdc shell "cd $RemoteDir && chmod +x seamless_clone_bench && export LD_LIBRARY_PATH=$RemoteDir:`$LD_LIBRARY_PATH && ./seamless_clone_bench && ls -la out"
+Write-Host ""
+Write-Host "Images on device: $RemoteDir/out/"
+Write-Host "Pull to PC:       .\scripts\pull_results.ps1"

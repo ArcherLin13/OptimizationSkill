@@ -9,3 +9,6 @@ $OHOS_NATIVE = "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\na
 
 # Optional: device OpenCV on phone
 # $DEVICE_LIB_DIR = "/chip_prod/lib64"
+
+# Optional: hdc push/run directory on device
+# $REMOTE_DIR = "/data/vendor/camera"
