@@ -1,0 +1,6 @@
+# Copy to scripts/config.local.ps1 (gitignored)
+
+$OHOS_NATIVE = "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"
+# $OPENCV_ROOT = "D:\path\to\opencv"
+# $DEVICE_LIB_DIR = "/chip_prod/lib64"
+# $REMOTE_DIR = "/data/vendor/camera"

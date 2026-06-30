@@ -1,0 +1,6 @@
+build/
+results/
+scripts/config.local.ps1
+opencv/*.so
+opencv/lib*/
+opencv/lib64*/

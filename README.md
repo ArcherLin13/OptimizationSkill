@@ -13,3 +13,5 @@
 - `notes/01-system-memory/` — 内存、ION、dma-buf、Camera 内存池
 - `notes/02-llm/` — 大模型、Attention、部署
 - `notes/03-hardware/` — 硬件与成本速查
+- `opt_bench_framework/` — **独立优化测试模板**（从大项目剥离、手机闭环）
+- `seamless_clone_bench/` — 实例：seamlessClone 优化
