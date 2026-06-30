@@ -4,3 +4,5 @@ bin/**/*.so
 *.ninja
 *.o
 *.so
+lib/seamless_clone_fft/_ref_dxt.cpp
+lib/seamless_clone_fft/gen_ocv_dft.py

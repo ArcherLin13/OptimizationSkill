@@ -107,7 +107,7 @@ int runBenchmark(const BenchCase& bench) {
                          "rect mask, default OpenCV path"});
     variants.push_back({"poisson_fft", VariantKind::Identical,
                         [&](cv::Mat& out) { runFftPoissonClone(bench, out); }, 100.0, 0.0,
-                        "FFT clone, 3-channel parallel DST (cv::dft)"});
+                        "FFT clone, native OpenCV DFT + NEON + 3ch parallel"});
     variants.push_back(
         {"prealloc_out", VariantKind::Identical,
          [&](cv::Mat& out) {
