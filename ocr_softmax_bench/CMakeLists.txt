@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(ocr_softmax_bench LANGUAGES CXX)
+
+add_executable(ocr_softmax_bench softmax_bench.cpp)
+target_compile_features(ocr_softmax_bench PRIVATE cxx_std_17)
+set_target_properties(ocr_softmax_bench PROPERTIES OUTPUT_NAME ocr_softmax_bench)
