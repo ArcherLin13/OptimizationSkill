@@ -41,6 +41,7 @@ Native host: compile `softmax_bench.cpp` with any C++17 compiler.
 
 | File | Purpose |
 |------|---------|
+| `softmax_ocr_opt.cl` | Optimized OpenCL kernel (1× exp per element) |
 | `softmax_bench.cpp` | C++ benchmark (baseline + optimized + correctness) |
 | `softmax_bench.js` | Node.js host benchmark (no compiler needed) |
 | `softmax_bench.py` | Python fallback |
