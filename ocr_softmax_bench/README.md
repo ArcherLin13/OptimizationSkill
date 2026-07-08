@@ -35,10 +35,21 @@ Each row is one work-group (`gx = j`). `gy` threads stride over `char_size` (~39
 
 ```powershell
 cd ocr_softmax_bench
+npm install koffi    # once, for real OpenCL GPU benchmark
+node run_bench.js    # CPU mirrors + Intel/AMD/NVIDIA OpenCL if available
 node softmax_bench.js
 ```
 
-Example result on win32 x64 (Node v24):
+Example result on win32 x64 (Node v24, Intel Iris Xe GPU):
+
+```
+OpenCL GPU:
+  ocl_baseline_1d     ~16 ms
+  ocl_opt_1d          ~15 ms   (matches ~17 ms on device)
+  ocl_opt_2d_lc256    ~0.3 ms  (gy parallel + local reduce)
+```
+
+CPU-only (`softmax_bench.js`):
 
 ```
 baseline  avg=30.06 ms
@@ -64,7 +75,7 @@ Native host: compile `softmax_bench.cpp` with any C++17 compiler.
 | `softmax_ocr_opt.cl` | 1D optimized kernel (1× exp, 1 thread/row) |
 | `softmax_ocr_opt_2d.cl` | 2D optimized kernel (`gy` parallel + local reduce) |
 | `softmax_bench.cpp` | C++ benchmark (baseline + optimized + correctness) |
-| `softmax_bench.js` | Node.js host benchmark (no compiler needed) |
+| `run_bench.js` | CPU + real OpenCL benchmark (needs `npm install koffi`) |
 | `softmax_bench.py` | Python fallback |
 | `scripts/build_ohos.ps1` | Cross-compile for OHOS arm64 |
 | `scripts/run_device.ps1` | Push binary to device and run |

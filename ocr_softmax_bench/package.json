@@ -1,0 +1,12 @@
+{
+  "name": "ocr_softmax_bench",
+  "private": true,
+  "description": "OCR softmax baseline vs optimized OpenCL kernels",
+  "scripts": {
+    "bench": "node run_bench.js",
+    "bench:cpu": "node softmax_bench.js"
+  },
+  "optionalDependencies": {
+    "koffi": "^2.11.0"
+  }
+}
