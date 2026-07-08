@@ -31,7 +31,27 @@ const size_t global[2] = { seqlen, local[1] };    // { 128, 256 }
 
 Each row is one work-group (`gx = j`). `gy` threads stride over `char_size` (~39 elements/lane for 9973÷256), then tree-reduce max/sum in `__local` memory. Tune `LOCAL_CHAR` to 128 / 256 / 512 for your GPU.
 
-## Quick run (Windows / any host with Node.js)
+## Test vectors (for your device)
+
+```powershell
+node generate_testdata.js
+# → testdata/logits.bin, probs_ref.bin, manifest.json
+```
+
+| File | Size | Role |
+|------|------|------|
+| `logits.bin` | 128×9973×4 = **5,106,176 B** | kernel input |
+| `probs_ref.bin` | same | golden output (compare your kernel) |
+| `manifest.json` | — | dims, `global_size`, `local_mem` |
+
+**`reduce_buf` is not a binary file.** It is on-chip local memory sized at launch:
+
+```
+bytes = LOCAL_CHAR × 4   (512 → 2048 B, 256 → 1024 B)
+clSetKernelArg(kernel, 4, bytes, nullptr);
+```
+
+Fixed for a given launch: tied to `local_size[1]` / `-DLOCAL_CHAR=`, not `char_size`.
 
 ```powershell
 cd ocr_softmax_bench

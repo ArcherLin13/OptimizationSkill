@@ -1,0 +1,64 @@
+{
+  "description": "OCR softmax test vectors (seqlen x char_size row-major)",
+  "seqlen": 128,
+  "char_size": 9973,
+  "num_elements": 1276544,
+  "dtype": "float32",
+  "seed": 42,
+  "files": {
+    "logits": {
+      "path": "logits.bin",
+      "bytes": 5106176,
+      "layout": "logits[j * char_size + k]"
+    },
+    "probs_ref": {
+      "path": "probs_ref.bin",
+      "bytes": 5106176,
+      "layout": "expected softmax output"
+    }
+  },
+  "kernels": {
+    "opt_1d": {
+      "file": "softmax_ocr_opt.cl",
+      "entry": "softmax_ocr_opt",
+      "global_size": [
+        128
+      ],
+      "local_size": [
+        0
+      ],
+      "local_mem_bytes": 0
+    },
+    "opt_2d": {
+      "file": "softmax_ocr_opt_2d.cl",
+      "entry": "softmax_ocr_opt_2d",
+      "build_options": "-DLOCAL_CHAR=512",
+      "global_size": [
+        128,
+        512
+      ],
+      "local_size": [
+        1,
+        512
+      ],
+      "local_mem_bytes": 2048,
+      "local_mem_arg": {
+        "name": "reduce_buf",
+        "index": 4,
+        "note": "GPU scratch only — do NOT load from host binary"
+      }
+    }
+  },
+  "reduce_buf": {
+    "is_host_input": false,
+    "size_bytes_formula": "LOCAL_CHAR * sizeof(float)",
+    "size_bytes_for_recommended_launch": 2048,
+    "depends_on": "local_size[1] (gy), must equal LOCAL_CHAR compile flag",
+    "fixed_for_given_launch": true
+  },
+  "verify": {
+    "compare_output_to": "probs_ref.bin",
+    "tolerance_max_abs_diff": 0.001,
+    "row_sum_tolerance": 0.001
+  }
+}
