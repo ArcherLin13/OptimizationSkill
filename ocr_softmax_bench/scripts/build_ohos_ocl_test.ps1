@@ -13,8 +13,8 @@ if ([string]::IsNullOrWhiteSpace($OhosNative)) {
 
 $Headers = Join-Path $Root "third_party\OpenCL-Headers\CL\cl.h"
 if (-not (Test-Path $Headers)) {
-    Write-Host "Missing OpenCL headers. Run:"
-    Write-Host "  cd third_party && git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git"
+    Write-Host "Missing vendored OpenCL headers: $Headers"
+    Write-Host "Pull latest repo (third_party/OpenCL-Headers should be included)."
     exit 1
 }
 

@@ -1,3 +1,7 @@
-# OpenCL headers (required for ocl_test_2d build)
+# Third-party (vendored in repo)
 
-git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git OpenCL-Headers
+## OpenCL-Headers (`OpenCL-Headers/CL/`)
+
+Khronos OpenCL C API headers (Apache-2.0). See `OpenCL-Headers/LICENSE`.
+
+No separate download — used by `ocl_test_2d` build.

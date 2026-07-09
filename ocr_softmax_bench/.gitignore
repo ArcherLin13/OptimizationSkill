@@ -1,4 +1,4 @@
 build/
 node_modules/
 testdata/*.bin
-third_party/OpenCL-Headers/
+third_party/ohos/

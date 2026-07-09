@@ -7,14 +7,9 @@ cd ocr_softmax_bench
 node generate_testdata.js
 ```
 
-## 2. 拉 OpenCL 头文件（首次）
+## 2. 编译 ocl_test_2d（OHOS arm64）
 
-```powershell
-cd third_party
-git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git
-```
-
-## 3. 编译 ocl_test_2d（OHOS arm64）
+OpenCL 头文件已包含在仓库 `third_party/OpenCL-Headers/`，无需额外下载。
 
 ```powershell
 .\scripts\build_ohos_ocl_test.ps1
@@ -36,7 +31,7 @@ git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git
 
 NDK 无 libOpenCL 也可链接；真机运行时会加载 `/vendor/lib64/libOpenCL.so`。
 
-## 4. 推到手机并跑
+## 3. 推到手机并跑
 
 ```powershell
 .\scripts\run_device_2d.ps1
@@ -52,7 +47,7 @@ hdc file send testdata\probs_ref.bin /data/vendor/camera/testdata/
 hdc shell "cd /data/vendor/camera && chmod +x ocl_test_2d && ./ocl_test_2d --data testdata --local-char 512 --runs 20"
 ```
 
-## 5. 输出说明
+## 4. 输出说明
 
 ```text
 correctness max|diff|=...  rows_bad=0  PASS
@@ -62,7 +57,7 @@ OpenCL profiling (kernel only): avg=XX.XXX ms
 - **正确性**：对比 `probs_ref.bin`，`max|diff| < 1e-3`
 - **Profiling**：OpenCL event 时间（纯 kernel，不含 readback）
 
-## 6. Launch 参数（2D kernel）
+## 5. Launch 参数（2D kernel）
 
 | 项 | 值 |
 |----|-----|
