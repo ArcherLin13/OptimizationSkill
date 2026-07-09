@@ -1,9 +1,10 @@
 // Device test: softmax_ocr_opt_2d correctness + OpenCL event profiling.
-// Build: needs OpenCL (CL/cl.h, -lOpenCL)
-// Usage:
-//   ./ocl_test_2d --data testdata [--local-char 512] [--runs 20]
+// Build: needs OpenCL headers; links libOpenCL OR dlopen on OHOS (OCR_OPENCL_DLOPEN).
 
 #include <CL/cl.h>
+#ifdef OCR_OPENCL_DLOPEN
+#include "opencl_dynload.h"
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -126,6 +127,12 @@ int badRowSums(const float* probs, float tol) {
 
 int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
+
+#ifdef OCR_OPENCL_DLOPEN
+    if (!opencl_load()) {
+        return 1;
+    }
+#endif
 
     if ((args.local_char & (args.local_char - 1)) != 0 || args.local_char <= 0) {
         std::fprintf(stderr, "--local-char must be power of two (128/256/512)\n");

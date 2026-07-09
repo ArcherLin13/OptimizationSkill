@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$Exe = Join-Path $Root "build\ohos-arm64\ocl_test_2d"
+$Exe = Join-Path $Root "build\ohos-ocl-test\ocl_test_2d"
 $DataDir = Join-Path $Root "testdata"
 $Kernel = Join-Path $Root "softmax_ocr_opt_2d.cl"
 
@@ -18,13 +18,13 @@ $Hdc = Join-Path (Split-Path $OhosNative -Parent) "toolchains\hdc.exe"
 foreach ($f in @($Exe, "$DataDir\logits.bin", "$DataDir\probs_ref.bin", $Kernel)) {
     if (-not (Test-Path $f)) {
         Write-Host "Missing: $f"
-        Write-Host "Build: .\scripts\build_device_test.ps1"
+        Write-Host "Build: .\scripts\build_ohos_ocl_test.ps1"
         Write-Host "Data:  node generate_testdata.js"
         exit 1
     }
 }
 
-$targets = & $Hdc list targets 2>&1
+$targets = & $Hdc list targets 2>&1 | Out-String
 if ($targets -match "Empty") {
     Write-Host "No hdc device connected."
     exit 1
