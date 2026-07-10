@@ -49,9 +49,18 @@ hdc shell "cd /data/vendor/camera && chmod +x ocl_test_2d && ./ocl_test_2d --dat
 
 ## 4. 输出说明
 
+一次跑 **三个版本** 对比：
+
 ```text
-correctness max|diff|=...  rows_bad=0  PASS
-OpenCL profiling (kernel only): avg=XX.XXX ms
+variant                            avg_ms    max|diff|    check
+baseline (2x exp, 1D)              XX.XXX ms  ...         PASS
+opt_1d (1x exp, 1D)                XX.XXX ms  ...         PASS
+opt_2d (1x exp, gy parallel)          X.XXX ms  ...         PASS
+
+=== speedup ===
+  opt_1d vs baseline:  X.XXx
+  opt_2d vs baseline:  XX.XXx
+  opt_2d vs opt_1d:    X.XXx
 ```
 
 - **正确性**：对比 `probs_ref.bin`，`max|diff| < 1e-3`
