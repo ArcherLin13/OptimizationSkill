@@ -1,11 +1,16 @@
 # HarmonyOS CTC pipeline device test
 
-Compare on phone:
+Compare on phone (**production baseline = opt_2d**, not 1D):
 
 | Path | GPU | CPU |
 |------|-----|-----|
-| **original** | `softmax_ocr_opt` → read `probs` (4.87 MB) | `decodeTextFromProbs` (argmax × 128) |
-| **fused** | `softmax_ocr_fused_ctc` → read `token_ids` + `max_probs` (1 KB) | `decodeTextFromArgmax` (CTC collapse) |
+| **opt_2d+decode** | `softmax_ocr_opt_2d` (global={128,512}) → read `probs` (4.87 MB) | `decodeTextFromProbs` |
+| **fused+decode** | `softmax_ocr_fused_ctc` → read `token_ids` + `max_probs` (1 KB) | `decodeTextFromArgmax` |
+
+```powershell
+.\scripts\run_device_ctc.ps1              # default local_char=512
+.\scripts\run_device_ctc.ps1 -LocalChar 512
+```
 
 ## Build & run
 
@@ -25,13 +30,10 @@ Optional:
 ## Expected output
 
 ```text
-decode correctness: PASS (emitted=128 tokens)
+decode correctness: PASS
 path            kernel       read     decode      total
-original        X.XXX ms   X.XXX ms   X.XXX ms   X.XXX ms
-fused           X.XXX ms   X.XXX ms   X.XXX ms   X.XXX ms
-
-=== speedup ===
-  e2e total:     X.XXx
+opt_2d+decode   ~2.XXX ms   X.XXX ms   ~7.XXX ms   X.XXX ms
+fused+decode    X.XXX ms   X.XXX ms   X.XXX ms   X.XXX ms
 ```
 
 ## Files pushed to device
@@ -39,7 +41,7 @@ fused           X.XXX ms   X.XXX ms   X.XXX ms   X.XXX ms
 | Remote path | Local file |
 |-------------|------------|
 | `/data/vendor/camera/ocl_test_ctc` | `build/ohos-ocl-test/ocl_test_ctc` |
-| `softmax_ocr_opt.cl` | kernel |
+| `softmax_ocr_opt_2d.cl` | production baseline kernel |
 | `softmax_ocr_fused_ctc.cl` | fused kernel |
 | `testdata/logits.bin` | input |
 

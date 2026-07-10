@@ -1,6 +1,7 @@
 param(
     [string]$OhosNative = "",
     [string]$RemoteDir = "/data/vendor/camera",
+    [int]$LocalChar = 512,
     [int]$Runs = 20,
     [int]$Warmup = 3
 )
@@ -16,7 +17,7 @@ if ([string]::IsNullOrWhiteSpace($OhosNative)) {
 $Hdc = Join-Path (Split-Path $OhosNative -Parent) "toolchains\hdc.exe"
 
 $KernelFiles = @(
-    "softmax_ocr_opt.cl",
+    "softmax_ocr_opt_2d.cl",
     "softmax_ocr_fused_ctc.cl"
 )
 
@@ -42,6 +43,6 @@ foreach ($kf in $KernelFiles) {
 }
 & $Hdc file send "$DataDir\logits.bin" "$RemoteDir/testdata/logits.bin"
 
-$cmd = "cd $RemoteDir && chmod +x ocl_test_ctc && ./ocl_test_ctc --data testdata --runs $Runs --warmup $Warmup"
+$cmd = "cd $RemoteDir && chmod +x ocl_test_ctc && ./ocl_test_ctc --data testdata --local-char $LocalChar --runs $Runs --warmup $Warmup"
 Write-Host $cmd
 & $Hdc shell $cmd
