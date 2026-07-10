@@ -50,7 +50,7 @@ struct Args {
 struct Launch2D {
     size_t global[2];
     size_t local[2];
-    size_t local_mem_bytes;
+    size_t local_mem_bytes;  // opt_2d: LOCAL_CHAR*4; fused_2d: LOCAL_CHAR*8
 };
 
 struct PipelineTiming {
@@ -75,7 +75,7 @@ Args parseArgs(int argc, char** argv) {
             std::printf(
                 "Usage: %s [--data DIR] [--local-char N] [--runs N] [--warmup N]\n"
                 "  original = softmax_ocr_opt_2d + read probs + CPU decodeText\n"
-                "  fused      = softmax_ocr_fused_ctc + read argmax + CPU decodeText\n",
+                "  fused      = softmax_ocr_fused_ctc_2d + read argmax + CPU decodeText\n",
                 argv[0]);
             std::exit(0);
         }
@@ -141,26 +141,6 @@ double benchKernel2D(cl_command_queue queue, cl_kernel kernel, const Launch2D& l
     return sum / runs;
 }
 
-double benchKernel1D(cl_command_queue queue, cl_kernel kernel, int warmup, int runs) {
-    const size_t global = static_cast<size_t>(kSeqLen);
-    for (int i = 0; i < warmup; ++i) {
-        cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &global, nullptr, 0, nullptr, &ev),
-                  "warmup");
-        OCL_CHECK(clWaitForEvents(1, &ev), "warmup wait");
-        clReleaseEvent(ev);
-    }
-    double sum = 0.0;
-    for (int i = 0; i < runs; ++i) {
-        cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &global, nullptr, 0, nullptr, &ev),
-                  "kernel");
-        sum += profileMs(ev);
-        clReleaseEvent(ev);
-    }
-    return sum / runs;
-}
-
 PipelineTiming runOriginalPath2D(cl_command_queue queue, cl_kernel softmax_2d_k, const Launch2D& launch,
                                  cl_mem probs_buf, int warmup, int runs) {
     PipelineTiming t;
@@ -185,10 +165,10 @@ PipelineTiming runOriginalPath2D(cl_command_queue queue, cl_kernel softmax_2d_k,
     return t;
 }
 
-PipelineTiming runFusedPath(cl_command_queue queue, cl_kernel fused_k, cl_mem token_buf,
-                            cl_mem maxprob_buf, int warmup, int runs) {
+PipelineTiming runFusedPath2D(cl_command_queue queue, cl_kernel fused_2d_k, const Launch2D& launch,
+                              cl_mem token_buf, cl_mem maxprob_buf, int warmup, int runs) {
     PipelineTiming t;
-    t.kernel_ms = benchKernel1D(queue, fused_k, warmup, runs);
+    t.kernel_ms = benchKernel2D(queue, fused_2d_k, launch, warmup, runs);
 
     std::vector<int> token_ids(kSeqLen);
     std::vector<float> max_probs(kSeqLen);
@@ -236,7 +216,7 @@ int main(int argc, char** argv) {
     }
     const float* logits_host = reinterpret_cast<const float*>(logits_bytes.data());
 
-    const std::string src = readText("softmax_ocr_opt_2d.cl") + "\n" + readText("softmax_ocr_fused_ctc.cl");
+    const std::string src = readText("softmax_ocr_opt_2d.cl") + "\n" + readText("softmax_ocr_fused_ctc_2d.cl");
     const char* src_ptr = src.c_str();
     const size_t src_len = src.size();
 
@@ -270,6 +250,7 @@ int main(int argc, char** argv) {
     const int char_size = kCharSize;
     const size_t lc = static_cast<size_t>(args.local_char);
     const Launch2D launch2d = {{static_cast<size_t>(kSeqLen), lc}, {1, lc}, lc * sizeof(float)};
+    const Launch2D launch_fused = {{static_cast<size_t>(kSeqLen), lc}, {1, lc}, lc * sizeof(float) * 2};
 
     cl_kernel softmax_2d_k = clCreateKernel(prog, "softmax_ocr_opt_2d", &err);
     OCL_CHECK(err, "softmax_ocr_opt_2d");
@@ -279,13 +260,14 @@ int main(int argc, char** argv) {
     OCL_CHECK(clSetKernelArg(softmax_2d_k, 3, sizeof(char_size), &char_size), "2d arg3");
     OCL_CHECK(clSetKernelArg(softmax_2d_k, 4, launch2d.local_mem_bytes, nullptr), "2d arg4 local");
 
-    cl_kernel fused_k = clCreateKernel(prog, "softmax_ocr_fused_ctc", &err);
-    OCL_CHECK(err, "softmax_ocr_fused_ctc");
-    OCL_CHECK(clSetKernelArg(fused_k, 0, sizeof(cl_mem), &logits_buf), "f arg0");
-    OCL_CHECK(clSetKernelArg(fused_k, 1, sizeof(cl_mem), &token_buf), "f arg1");
-    OCL_CHECK(clSetKernelArg(fused_k, 2, sizeof(cl_mem), &maxprob_buf), "f arg2");
-    OCL_CHECK(clSetKernelArg(fused_k, 3, sizeof(seqlen), &seqlen), "f arg3");
-    OCL_CHECK(clSetKernelArg(fused_k, 4, sizeof(char_size), &char_size), "f arg4");
+    cl_kernel fused_2d_k = clCreateKernel(prog, "softmax_ocr_fused_ctc_2d", &err);
+    OCL_CHECK(err, "softmax_ocr_fused_ctc_2d");
+    OCL_CHECK(clSetKernelArg(fused_2d_k, 0, sizeof(cl_mem), &logits_buf), "f arg0");
+    OCL_CHECK(clSetKernelArg(fused_2d_k, 1, sizeof(cl_mem), &token_buf), "f arg1");
+    OCL_CHECK(clSetKernelArg(fused_2d_k, 2, sizeof(cl_mem), &maxprob_buf), "f arg2");
+    OCL_CHECK(clSetKernelArg(fused_2d_k, 3, sizeof(seqlen), &seqlen), "f arg3");
+    OCL_CHECK(clSetKernelArg(fused_2d_k, 4, sizeof(char_size), &char_size), "f arg4");
+    OCL_CHECK(clSetKernelArg(fused_2d_k, 5, launch_fused.local_mem_bytes, nullptr), "f arg5 local");
 
     // --- correctness (single run) ---
     cl_event ev = nullptr;
@@ -301,8 +283,10 @@ int main(int argc, char** argv) {
               "read probs once");
 
     const size_t global1d = static_cast<size_t>(kSeqLen);
-    OCL_CHECK(clEnqueueNDRangeKernel(queue, fused_k, 1, nullptr, &global1d, nullptr, 0, nullptr, &ev),
-              "fused once");
+    (void)global1d;
+    OCL_CHECK(clEnqueueNDRangeKernel(queue, fused_2d_k, 2, nullptr, launch_fused.global, launch_fused.local,
+                                     0, nullptr, &ev),
+              "fused_2d once");
     OCL_CHECK(clWaitForEvents(1, &ev), "wait fused");
     clReleaseEvent(ev);
 
@@ -324,18 +308,20 @@ int main(int argc, char** argv) {
     std::printf("  device: %s\n", deviceName(dev).c_str());
     std::printf("  seqlen=%d char_size=%d local_char=%d\n", kSeqLen, kCharSize, args.local_char);
     std::printf("  original kernel: softmax_ocr_opt_2d  global={%d,%zu} local={1,%zu}\n", kSeqLen, lc, lc);
-    std::printf("  fused kernel:    softmax_ocr_fused_ctc  global={%d}\n", kSeqLen);
+    std::printf("  fused kernel:    softmax_ocr_fused_ctc_2d  global={%d,%zu} local={1,%zu}\n", kSeqLen,
+                lc, lc);
     std::printf("  probs readback: %.2f MB\n", static_cast<double>(kNumElem * sizeof(float)) / (1024.0 * 1024.0));
     std::printf("  fused readback: %.2f KB\n",
                 static_cast<double>(kSeqLen * (sizeof(int) + sizeof(float))) / 1024.0);
     std::printf("  decode correctness: %s (emitted=%zu tokens)\n", decode_ok ? "PASS" : "FAIL",
                 ref_decode.token_preds.size());
-    std::printf("  warmup=%d runs=%d\n\n", args.warmup, args.runs);
+    std::printf("\n  note: read = GPU->CPU clEnqueueReadBuffer (4.87MB probs vs 1KB argmax)\n");
+    std::printf("        production decode 9ms often includes this transfer implicitly\n\n");
 
     const PipelineTiming orig =
         runOriginalPath2D(queue, softmax_2d_k, launch2d, probs_buf, args.warmup, args.runs);
     const PipelineTiming fused =
-        runFusedPath(queue, fused_k, token_buf, maxprob_buf, args.warmup, args.runs);
+        runFusedPath2D(queue, fused_2d_k, launch_fused, token_buf, maxprob_buf, args.warmup, args.runs);
 
     std::printf("%-14s %10s %10s %10s %10s\n", "path", "kernel", "read", "decode", "total");
     std::printf("%-14s %9.3f ms %9.3f ms %9.3f ms %9.3f ms\n", "opt_2d+decode", orig.kernel_ms,
@@ -351,7 +337,7 @@ int main(int argc, char** argv) {
     std::printf("  decode (CPU):  %.3f -> %.3f ms\n", orig.decode_ms, fused.decode_ms);
 
     clReleaseKernel(softmax_2d_k);
-    clReleaseKernel(fused_k);
+    clReleaseKernel(fused_2d_k);
     clReleaseMemObject(logits_buf);
     clReleaseMemObject(probs_buf);
     clReleaseMemObject(token_buf);

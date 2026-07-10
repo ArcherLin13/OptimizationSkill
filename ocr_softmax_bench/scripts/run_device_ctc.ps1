@@ -18,7 +18,7 @@ $Hdc = Join-Path (Split-Path $OhosNative -Parent) "toolchains\hdc.exe"
 
 $KernelFiles = @(
     "softmax_ocr_opt_2d.cl",
-    "softmax_ocr_fused_ctc.cl"
+    "softmax_ocr_fused_ctc_2d.cl"
 )
 
 foreach ($f in @($Exe, "$DataDir\logits.bin") + ($KernelFiles | ForEach-Object { Join-Path $Root $_ })) {
