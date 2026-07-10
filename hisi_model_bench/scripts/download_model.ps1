@@ -15,9 +15,14 @@ New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
 
 $models = @(
     @{
-        Name = "mnist (13 KB, recommended)"
-        Url  = "https://download.mindspore.cn/model_zoo/official/lite/mnist_lite/mnist.ms"
+        Name = "add (1 KB, recommended for bench)"
+        Url  = "https://download.mindspore.cn/model_zoo/official/lite/quick_start/add.ms"
         File = $Out
+    },
+    @{
+        Name = "mnist (13 KB)"
+        Url  = "https://download.mindspore.cn/model_zoo/official/lite/mnist_lite/mnist.ms"
+        File = Join-Path $Root "testdata\mnist.ms"
     },
     @{
         Name = "mobilenetv2 (13 MB, slower load test)"
@@ -26,7 +31,7 @@ $models = @(
     }
 )
 
-Write-Host "Downloading MNIST tiny model -> $Out"
+Write-Host "Downloading add tiny model -> $Out"
 Invoke-WebRequest -Uri $models[0].Url -OutFile $models[0].File -UseBasicParsing
 $kb = [math]::Round((Get-Item $models[0].File).Length / 1024, 1)
 Write-Host "Done: tiny.ms ($kb KB)"

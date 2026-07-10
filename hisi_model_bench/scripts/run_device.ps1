@@ -35,10 +35,11 @@ if ($targets -match "Empty") {
     exit 1
 }
 
+$RemoteModel = "$RemoteDir/testdata/tiny.ms"
 & $Hdc shell "mkdir -p $RemoteDir/testdata"
 & $Hdc file send $Exe "$RemoteDir/ms_bench"
-& $Hdc file send $ModelPath "$RemoteDir/testdata/tiny.ms"
+& $Hdc file send $ModelPath $RemoteModel
 
-$cmd = "cd $RemoteDir && chmod +x ms_bench && ./ms_bench --model testdata/tiny.ms --device $Device --runs 10"
+$cmd = "cd $RemoteDir && chmod +x ms_bench && ./ms_bench --model $RemoteModel --device $Device --runs 10"
 Write-Host $cmd
 & $Hdc shell $cmd
