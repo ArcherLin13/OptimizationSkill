@@ -88,12 +88,34 @@ correctness PASS
 
 Native host: compile `softmax_bench.cpp` with any C++17 compiler.
 
+## CTC fused pipeline (softmax + argmax → decodetext)
+
+Greedy CTC decode after softmax:
+
+```text
+original:  softmax → probs[128×9973] → CPU findMaxProbability × 128 → CTC collapse
+fused:     softmax_ocr_fused_ctc → token_ids[128] + max_probs[128] → CPU decodeTextFromArgmax
+```
+
+```powershell
+node bench_ctc_pipeline.js
+```
+
+| File | Purpose |
+|------|---------|
+| `softmax_ocr_fused_ctc.cl` | Fused kernel (argmax on logits + 1× exp for prob at argmax) |
+| `ctc_decode.js` | CPU `decodeTextFromProbs` / `decodeTextFromArgmax` (blank=0) |
+| `bench_ctc_pipeline.js` | End-to-end timing: original vs fused |
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `softmax_ocr_opt.cl` | 1D optimized kernel (1× exp, 1 thread/row) |
 | `softmax_ocr_opt_2d.cl` | 2D optimized kernel (`gy` parallel + local reduce) |
+| `softmax_ocr_fused_ctc.cl` | Fused softmax+argmax for CTC greedy decode |
+| `ctc_decode.js` | CPU CTC decodetext helpers |
+| `bench_ctc_pipeline.js` | Original vs fused pipeline benchmark |
 | `softmax_bench.cpp` | C++ benchmark (baseline + optimized + correctness) |
 | `run_bench.js` | CPU + real OpenCL benchmark (needs `npm install koffi`) |
 | `softmax_bench.py` | Python fallback |
