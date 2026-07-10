@@ -44,5 +44,6 @@ if (-not [string]::IsNullOrWhiteSpace($OpenCLLibrary)) {
 }
 
 & $Cmake @cmakeArgs
-& $Cmake --build $BuildDir --target ocl_test_2d
+& $Cmake --build $BuildDir --target ocl_test_2d ocl_test_ctc
 Write-Host "Built: $BuildDir\ocl_test_2d"
+Write-Host "Built: $BuildDir\ocl_test_ctc"

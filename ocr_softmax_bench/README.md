@@ -98,8 +98,11 @@ fused:     softmax_ocr_fused_ctc → token_ids[128] + max_probs[128] → CPU dec
 ```
 
 ```powershell
-node bench_ctc_pipeline.js
+node bench_ctc_pipeline.js       # PC (OpenCL + CPU)
+.\scripts\run_device_ctc.ps1   # HarmonyOS phone via hdc
 ```
+
+See `HARMONYOS_CTC_TEST.md` for device details.
 
 | File | Purpose |
 |------|---------|
