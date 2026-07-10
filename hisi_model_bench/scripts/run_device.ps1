@@ -21,7 +21,7 @@ foreach ($f in @($Exe, $ModelPath)) {
     if (-not (Test-Path $f)) {
         Write-Host "Missing: $f"
         if (-not (Test-Path $ModelPath)) {
-            Write-Host "Generate model: python generate_tiny_model.py"
+            Write-Host "Download model: .\scripts\download_model.ps1"
             Write-Host "Or copy your .ms model to testdata/tiny.ms"
         }
         Write-Host "Build: .\scripts\build_ohos.ps1"

@@ -1,2 +1,3 @@
 build/
 testdata/*.ms
+!testdata/tiny.ms
