@@ -32,5 +32,6 @@ $cmakeArgs = @(
 )
 
 & $Cmake @cmakeArgs
-& $Cmake --build $BuildDir --target ms_bench
+& $Cmake --build $BuildDir --target ms_bench ms_dual_bench
 Write-Host "Built: $BuildDir\ms_bench"
+Write-Host "Built: $BuildDir\ms_dual_bench"

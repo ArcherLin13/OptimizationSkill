@@ -13,3 +13,8 @@ add_executable(ms_bench device_test/ms_load_infer_bench.cpp)
 target_include_directories(ms_bench PRIVATE "${MS_INCLUDE}")
 target_link_directories(ms_bench PRIVATE "${MS_LIBDIR}")
 target_link_libraries(ms_bench PRIVATE mindspore_lite_ndk pthread)
+
+add_executable(ms_dual_bench device_test/ms_dual_infer_bench.cpp)
+target_include_directories(ms_dual_bench PRIVATE "${MS_INCLUDE}" "${CMAKE_CURRENT_SOURCE_DIR}/device_test")
+target_link_directories(ms_dual_bench PRIVATE "${MS_LIBDIR}")
+target_link_libraries(ms_dual_bench PRIVATE mindspore_lite_ndk pthread)
