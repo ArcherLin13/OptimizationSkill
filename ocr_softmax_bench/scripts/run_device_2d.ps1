@@ -1,7 +1,6 @@
 param(
     [string]$OhosNative = "",
-    [string]$RemoteDir = "/data/vendor/camera",
-    [int]$LocalChar = 512
+    [string]$RemoteDir = "/data/vendor/camera"
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +42,6 @@ foreach ($kf in $KernelFiles) {
 & $Hdc file send "$DataDir\logits.bin" "$RemoteDir/testdata/logits.bin"
 & $Hdc file send "$DataDir\probs_ref.bin" "$RemoteDir/testdata/probs_ref.bin"
 
-$cmd = "cd $RemoteDir && chmod +x ocl_test_2d && ./ocl_test_2d --data testdata --local-char $LocalChar --runs 20"
+$cmd = "cd $RemoteDir && chmod +x ocl_test_2d && ./ocl_test_2d --data testdata --runs 20"
 Write-Host $cmd
 & $Hdc shell $cmd

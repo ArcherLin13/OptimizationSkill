@@ -7,17 +7,10 @@
 //
 // vs softmax_ocr_opt (1D): same math (1× exp), but char_size work is split across gy threads.
 //
-// Launch (seqlen=128, LOCAL_CHAR=256):
-//   global_work_size = { 128, 256 }
-//   local_work_size  = {   1, 256 }
-//
-// Local memory arg: reduce_buf, size = LOCAL_CHAR * sizeof(float)
-//
-// Tune LOCAL_CHAR: try 128 / 256 / 512 (must divide evenly for tree reduce; use power of 2).
+// Launch: global={128, 512}  local={1, 512}
+// Local mem: reduce_buf = 512 * sizeof(float) = 2048 B
 
-#ifndef LOCAL_CHAR
-#define LOCAL_CHAR 256
-#endif
+#define LOCAL_CHAR 512
 
 __kernel void softmax_ocr_opt_2d(
     __global const float* restrict logits,

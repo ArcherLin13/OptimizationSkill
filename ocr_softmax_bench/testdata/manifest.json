@@ -32,7 +32,8 @@
     "opt_2d": {
       "file": "softmax_ocr_opt_2d.cl",
       "entry": "softmax_ocr_opt_2d",
-      "build_options": "-DLOCAL_CHAR=512",
+      "local_char": 512,
+      "note": "LOCAL_CHAR=512 hardcoded in softmax_ocr_opt_2d.cl",
       "global_size": [
         128,
         512
@@ -53,7 +54,7 @@
     "is_host_input": false,
     "size_bytes_formula": "LOCAL_CHAR * sizeof(float)",
     "size_bytes_for_recommended_launch": 2048,
-    "depends_on": "local_size[1] (gy), must equal LOCAL_CHAR compile flag",
+    "depends_on": "local_size[1] (gy) = 512, fixed in softmax_ocr_opt_2d.cl",
     "fixed_for_given_launch": true
   },
   "verify": {

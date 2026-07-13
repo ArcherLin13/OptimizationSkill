@@ -2,13 +2,10 @@
 //
 // argmax(logits) via phase-1 reduction; sum_exp in phase 2; max_prob = 1/sum_exp.
 //
-// Launch: global={seqlen, LOCAL_CHAR}  local={1, LOCAL_CHAR}
-// Local mem: reduce_buf, size = LOCAL_CHAR * 2 * sizeof(float)
-//   [0..LOCAL_CHAR-1] float values, [LOCAL_CHAR..2*LOCAL_CHAR-1] int indices (aliased)
+// Launch: global={seqlen, 512}  local={1, 512}
+// Local mem: reduce_buf, size = 512 * 2 * sizeof(float) = 4096 B
 
-#ifndef LOCAL_CHAR
-#define LOCAL_CHAR 256
-#endif
+#define LOCAL_CHAR 512
 
 __kernel void softmax_ocr_fused_ctc_2d(
     __global const float* restrict logits,

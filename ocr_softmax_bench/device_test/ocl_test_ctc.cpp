@@ -1,7 +1,8 @@
 // HarmonyOS device test: production path (opt_2d -> probs -> CPU decode) vs
 // fused (softmax+argmax -> light CPU decode).
 //
-// Usage: ./ocl_test_ctc [--data testdata] [--local-char 512] [--runs N] [--warmup N]
+// Usage: ./ocl_test_ctc [--data testdata] [--runs N] [--warmup N]
+// LOCAL_CHAR fixed at 512 in .cl kernels (no -D macro).
 
 #include <CL/cl.h>
 #ifdef OCR_OPENCL_DLOPEN
@@ -40,9 +41,10 @@ double msSince(Clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
+constexpr int kLocalChar = 512;
+
 struct Args {
     std::string data_dir = "testdata";
-    int local_char = 512;
     int runs = 20;
     int warmup = 3;
 };
@@ -65,15 +67,13 @@ Args parseArgs(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--data") == 0 && i + 1 < argc) {
             a.data_dir = argv[++i];
-        } else if (std::strcmp(argv[i], "--local-char") == 0 && i + 1 < argc) {
-            a.local_char = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--runs") == 0 && i + 1 < argc) {
             a.runs = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
             a.warmup = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
             std::printf(
-                "Usage: %s [--data DIR] [--local-char N] [--runs N] [--warmup N]\n"
+                "Usage: %s [--data DIR] [--runs N] [--warmup N]\n"
                 "  original = softmax_ocr_opt_2d + read probs + CPU decodeText\n"
                 "  fused      = softmax_ocr_fused_ctc_2d + read argmax + CPU decodeText\n",
                 argv[0]);
@@ -204,11 +204,6 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    if ((args.local_char & (args.local_char - 1)) != 0 || args.local_char <= 0) {
-        std::fprintf(stderr, "--local-char must be power of two (128/256/512)\n");
-        return 1;
-    }
-
     const auto logits_bytes = readFile(args.data_dir + "/logits.bin");
     if (logits_bytes.size() != kNumElem * sizeof(float)) {
         std::fprintf(stderr, "Bad logits.bin size\n");
@@ -230,10 +225,9 @@ int main(int argc, char** argv) {
     cl_command_queue queue = clCreateCommandQueue(ctx, dev, CL_QUEUE_PROFILING_ENABLE, &err);
     OCL_CHECK(err, "clCreateCommandQueue");
 
-    const std::string build_opts = "-DLOCAL_CHAR=" + std::to_string(args.local_char);
     cl_program prog = clCreateProgramWithSource(ctx, 1, &src_ptr, &src_len, &err);
     OCL_CHECK(err, "clCreateProgramWithSource");
-    OCL_CHECK(clBuildProgram(prog, 1, &dev, build_opts.c_str(), nullptr, nullptr), "clBuildProgram");
+    OCL_CHECK(clBuildProgram(prog, 1, &dev, "", nullptr, nullptr), "clBuildProgram");
 
     cl_mem logits_buf =
         clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, kNumElem * sizeof(float),
@@ -248,7 +242,7 @@ int main(int argc, char** argv) {
 
     const int seqlen = kSeqLen;
     const int char_size = kCharSize;
-    const size_t lc = static_cast<size_t>(args.local_char);
+    const size_t lc = static_cast<size_t>(kLocalChar);
     const Launch2D launch2d = {{static_cast<size_t>(kSeqLen), lc}, {1, lc}, lc * sizeof(float)};
     const Launch2D launch_fused = {{static_cast<size_t>(kSeqLen), lc}, {1, lc}, lc * sizeof(float) * 2};
 
@@ -306,7 +300,8 @@ int main(int argc, char** argv) {
 
     std::printf("OCR CTC pipeline device test (opt_2d+decode vs fused+decode)\n");
     std::printf("  device: %s\n", deviceName(dev).c_str());
-    std::printf("  seqlen=%d char_size=%d local_char=%d\n", kSeqLen, kCharSize, args.local_char);
+    std::printf("  seqlen=%d char_size=%d local_char=%d (fixed in .cl)\n", kSeqLen, kCharSize,
+                kLocalChar);
     std::printf("  original kernel: softmax_ocr_opt_2d  global={%d,%zu} local={1,%zu}\n", kSeqLen, lc, lc);
     std::printf("  fused kernel:    softmax_ocr_fused_ctc_2d  global={%d,%zu} local={1,%zu}\n", kSeqLen,
                 lc, lc);

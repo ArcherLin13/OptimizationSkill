@@ -31,9 +31,10 @@ constexpr float kTol = 1e-3f;
         }                                                                                     \
     } while (0)
 
+constexpr int kLocalChar = 512;
+
 struct Args {
     std::string data_dir = "testdata";
-    int local_char = 512;
     int runs = 20;
     int warmup = 3;
 };
@@ -61,15 +62,13 @@ Args parseArgs(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--data") == 0 && i + 1 < argc) {
             a.data_dir = argv[++i];
-        } else if (std::strcmp(argv[i], "--local-char") == 0 && i + 1 < argc) {
-            a.local_char = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--runs") == 0 && i + 1 < argc) {
             a.runs = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
             a.warmup = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
             std::printf(
-                "Usage: %s [--data DIR] [--local-char N] [--runs N] [--warmup N]\n"
+                "Usage: %s [--data DIR] [--runs N] [--warmup N]\n"
                 "  Compares baseline / opt_1d / opt_2d on device with CL profiling.\n",
                 argv[0]);
             std::exit(0);
@@ -203,11 +202,6 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    if ((args.local_char & (args.local_char - 1)) != 0 || args.local_char <= 0) {
-        std::fprintf(stderr, "--local-char must be power of two (128/256/512)\n");
-        return 1;
-    }
-
     const auto logits_bytes = readFile(args.data_dir + "/logits.bin");
     const auto ref_bytes = readFile(args.data_dir + "/probs_ref.bin");
     if (logits_bytes.size() != kNumElem * sizeof(float) ||
@@ -233,10 +227,9 @@ int main(int argc, char** argv) {
     cl_command_queue queue = clCreateCommandQueue(ctx, dev, CL_QUEUE_PROFILING_ENABLE, &err);
     OCL_CHECK(err, "clCreateCommandQueue");
 
-    std::string build_opts = "-DLOCAL_CHAR=" + std::to_string(args.local_char);
     cl_program prog = clCreateProgramWithSource(ctx, 1, &src_ptr, &src_len, &err);
     OCL_CHECK(err, "clCreateProgramWithSource");
-    OCL_CHECK(clBuildProgram(prog, 1, &dev, build_opts.c_str(), nullptr, nullptr), "clBuildProgram");
+    OCL_CHECK(clBuildProgram(prog, 1, &dev, "", nullptr, nullptr), "clBuildProgram");
 
     cl_mem logits_buf =
         clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, kNumElem * sizeof(float),
@@ -246,7 +239,7 @@ int main(int argc, char** argv) {
         clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, kNumElem * sizeof(float), nullptr, &err);
     OCL_CHECK(err, "probs_buf");
 
-    const size_t lc = static_cast<size_t>(args.local_char);
+    const size_t lc = static_cast<size_t>(kLocalChar);
     const BenchCase cases[] = {
         {"baseline (2x exp, 1D)", "softmax_ocr_baseline", 1, {static_cast<size_t>(kSeqLen), 0},
          {0, 0}, false, 0},

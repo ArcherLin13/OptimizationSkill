@@ -83,10 +83,10 @@ const manifest = {
     opt_2d: {
       file: "softmax_ocr_opt_2d.cl",
       entry: "softmax_ocr_opt_2d",
-      build_options: `-DLOCAL_CHAR=${LOCAL_CHAR}`,
       global_size: [SEQLEN, LOCAL_CHAR],
       local_size: [1, LOCAL_CHAR],
       local_mem_bytes: LOCAL_CHAR * 4,
+      local_char: LOCAL_CHAR,
       local_mem_arg: {
         name: "reduce_buf",
         index: 4,
