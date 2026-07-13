@@ -25,4 +25,4 @@ foreach ($lib in @($MsLib, $CppShared)) {
     Write-Host "Pushed $name"
 }
 
-return "export LD_LIBRARY_PATH=$RemoteDir:`$LD_LIBRARY_PATH"
+return ('export LD_LIBRARY_PATH=' + $RemoteDir + ':$LD_LIBRARY_PATH')
