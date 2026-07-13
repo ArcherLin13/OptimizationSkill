@@ -18,7 +18,7 @@
 namespace {
 
 struct Args {
-    std::string model_a = "testdata/tiny.ms";
+    std::string model_a = "testdata/mobilenetv2.ms";
     std::string model_b;
     std::string device = "nnrt";
     int runs = 20;
@@ -42,7 +42,7 @@ Args parseArgs(int argc, char** argv) {
             a.warmup = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
             std::printf(
-                "Usage: %s --model-a testdata/tiny.ms [--model-b path] [--device nnrt|cpu] [--runs N]\n"
+                "Usage: %s --model-a testdata/mobilenetv2.ms [--model-b path] [--device nnrt|cpu] [--runs N]\n"
                 "  If --model-b omitted, same file as --model-a (two independent instances).\n",
                 argv[0]);
             std::exit(0);

@@ -13,9 +13,15 @@ Models are **loaded once** before timing; benchmark is **infer only**.
 
 ```powershell
 cd hisi_model_bench
-.\scripts\download_model.ps1    # if needed
+.\scripts\download_model.ps1    # mobilenetv2.ms (~14 MB)
 .\scripts\build_ohos.ps1
 .\scripts\run_device_dual.ps1
+```
+
+若 NNRT 仍失败，先试 CPU：
+
+```powershell
+.\scripts\run_device_dual.ps1 -Device cpu
 ```
 
 Two different models:

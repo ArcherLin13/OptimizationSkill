@@ -15,15 +15,26 @@
 
 ## 1. 准备模型
 
+推荐官方 **mobilenetv2.ms**（HarmonyOS quick_start 同款）：
+
+```powershell
+.\scripts\download_model.ps1
+# 默认下载 mobilenetv2.ms (~14 MB)
+```
+
+`tiny.ms` / `add.ms`（1 KB）在部分新系统上会 `ModelBuildFromFile LITE_ERROR`，勿作首选。
+
 任选其一：
 
 ```powershell
-# A. 生成极小测试模型（PC 需 pip install mindspore）
-python generate_tiny_model.py
+# A. 官方模型（推荐）
+.\scripts\download_model.ps1
 
-# B. 复制你自己的小模型
-copy your_model.ms testdata\tiny.ms
+# B. 复制你自己的模型
+copy your_model.ms testdata\mobilenetv2.ms
 ```
+
+部署脚本会自动推送 SDK 里的 `libmindspore_lite_ndk.so` 和 `libc++_shared.so`，并设置 `LD_LIBRARY_PATH`。
 
 ## 2. 编译
 

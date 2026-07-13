@@ -4,14 +4,15 @@ param(
     [string]$ModelA = "",
     [string]$ModelB = "",
     [string]$Device = "nnrt",
-    [int]$Runs = 20
+    [int]$Runs = 20,
+    [switch]$SkipRuntimeLibs
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Exe = Join-Path $Root "build\ohos-arm64\ms_dual_bench"
 if ([string]::IsNullOrWhiteSpace($ModelA)) {
-    $ModelA = Join-Path $Root "testdata\tiny.ms"
+    $ModelA = Join-Path $Root "testdata\mobilenetv2.ms"
 }
 if ([string]::IsNullOrWhiteSpace($ModelB)) {
     $ModelB = $ModelA
@@ -22,13 +23,15 @@ if ([string]::IsNullOrWhiteSpace($OhosNative)) {
 }
 $Hdc = Join-Path (Split-Path $OhosNative -Parent) "toolchains\hdc.exe"
 
-foreach ($f in @($Exe, $ModelA)) {
-    if (-not (Test-Path $f)) {
-        Write-Host "Missing: $f"
-        Write-Host "Download: .\scripts\download_model.ps1"
-        Write-Host "Build:    .\scripts\build_ohos.ps1"
-        exit 1
-    }
+if (-not (Test-Path $Exe)) {
+    Write-Host "Missing: $Exe"
+    Write-Host "Build: .\scripts\build_ohos.ps1"
+    exit 1
+}
+if (-not (Test-Path $ModelA)) {
+    Write-Host "Missing model A: $ModelA"
+    Write-Host "Download: .\scripts\download_model.ps1"
+    exit 1
 }
 if ($ModelB -ne $ModelA -and -not (Test-Path $ModelB)) {
     Write-Host "Missing model B: $ModelB"
@@ -45,12 +48,17 @@ if ($targets -match "Empty") {
 & $Hdc file send $Exe "$RemoteDir/ms_dual_bench"
 & $Hdc file send $ModelA "$RemoteDir/testdata/model_a.ms"
 if ($ModelB -eq $ModelA) {
-    $remoteB = "$RemoteDir/testdata/model_a.ms"
+    $remoteB = "testdata/model_a.ms"
 } else {
     & $Hdc file send $ModelB "$RemoteDir/testdata/model_b.ms"
-    $remoteB = "$RemoteDir/testdata/model_b.ms"
+    $remoteB = "testdata/model_b.ms"
 }
 
-$cmd = "cd $RemoteDir && chmod +x ms_dual_bench && ./ms_dual_bench --model-a testdata/model_a.ms --model-b $remoteB --device $Device --runs $Runs"
+$ldPath = ""
+if (-not $SkipRuntimeLibs) {
+    $ldPath = & (Join-Path $PSScriptRoot "push_ms_runtime.ps1") -OhosNative $OhosNative -RemoteDir $RemoteDir
+}
+
+$cmd = "cd $RemoteDir && chmod +x ms_dual_bench && $ldPath ./ms_dual_bench --model-a testdata/model_a.ms --model-b $remoteB --device $Device --runs $Runs"
 Write-Host $cmd
 & $Hdc shell $cmd
