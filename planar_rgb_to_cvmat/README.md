@@ -11,6 +11,8 @@ Converts **planar** RGB (full R plane, then G, then B) into OpenCV **interleaved
 
 ## NEON (CPU, recommended for host Mat)
 
+**Why NEON may not beat “scalar”:** the convert is **memory-bound** (~24 bytes/pixel). Once DRAM is saturated, SIMD cannot go faster. Also `clang -O2` often **auto-vectorizes** the simple scalar loop into NEON already, so times look identical unless you disable auto-vec (the device bench does that for the scalar path now). Prefer **more threads** over more NEON for this kernel; use GPU only when data already lives on GPU.
+
 ```cpp
 #include "device_test/neon_planar_to_cv32fc3.h"
 

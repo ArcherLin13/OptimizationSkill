@@ -121,15 +121,29 @@ void fillPlanes(std::vector<float>& r, std::vector<float>& g, std::vector<float>
     }
 }
 
+// Pure scalar reference: disable auto-vectorization so "scalar vs NEON" is fair.
+// Without this, clang -O2/-O3 often turns the loop into NEON anyway → identical times.
+#if defined(__clang__)
+#define NO_AUTO_VEC _Pragma("clang loop vectorize(disable) interleave(disable)")
+#elif defined(__GNUC__)
+#define NO_AUTO_VEC _Pragma("GCC ivdep") /* weak; prefer clang for OHOS */
+#else
+#define NO_AUTO_VEC
+#endif
+
 void cpuRefBgrRows(const float* r, const float* g, const float* b, float* dst, int w, int y0,
                    int y1) {
     for (int y = y0; y < y1; ++y) {
+        const float* rr = r + static_cast<size_t>(y) * w;
+        const float* gg = g + static_cast<size_t>(y) * w;
+        const float* bb = b + static_cast<size_t>(y) * w;
+        float* out = dst + static_cast<size_t>(y) * w * 3;
+        NO_AUTO_VEC
         for (int x = 0; x < w; ++x) {
-            const size_t si = static_cast<size_t>(y) * w + x;
-            float* out = dst + si * 3;
-            out[0] = b[si];
-            out[1] = g[si];
-            out[2] = r[si];
+            out[0] = bb[x];
+            out[1] = gg[x];
+            out[2] = rr[x];
+            out += 3;
         }
     }
 }
@@ -573,13 +587,17 @@ int main(int argc, char** argv) {
                                                          : "fallback scalar");
 
     std::printf("=== CPU / NEON ===\n");
+    std::printf("  Note: this convert is DRAM-bound (~24 B/pix). NEON rarely helps much.\n");
+    std::printf("  If scalar≈NEON before, clang likely auto-vectorized scalar already.\n");
+    std::printf("  scalar below uses #pragma clang loop vectorize(disable).\n");
     std::printf("  scalar 1t:  %.3f ms  (%.1f GB/s)\n", cpu_1t_ms, gbps(bytes, cpu_1t_ms));
     std::printf("  scalar %dt: %.3f ms  (%.1f GB/s)\n", cpu_threads, cpu_mt_ms,
                 gbps(bytes, cpu_mt_ms));
-    std::printf("  NEON 1t:    %.3f ms  (%.1f GB/s)  max_diff=%.3e  %s\n", neon_1t_ms,
-                gbps(bytes, neon_1t_ms), neon_diff, neon_ok ? "OK" : "FAIL");
-    std::printf("  NEON %dt:   %.3f ms  (%.1f GB/s)\n\n", cpu_threads, neon_mt_ms,
-                gbps(bytes, neon_mt_ms));
+    std::printf("  NEON 1t:    %.3f ms  (%.1f GB/s)  max_diff=%.3e  %s  (vs scalar1t %.2fx)\n",
+                neon_1t_ms, gbps(bytes, neon_1t_ms), neon_diff, neon_ok ? "OK" : "FAIL",
+                cpu_1t_ms / neon_1t_ms);
+    std::printf("  NEON %dt:   %.3f ms  (%.1f GB/s)  (vs scalarMT %.2fx)\n\n", cpu_threads,
+                neon_mt_ms, gbps(bytes, neon_mt_ms), cpu_mt_ms / neon_mt_ms);
 
     std::printf("=== GPU kernel only (data already on device) ===\n");
     bool all_ok = neon_ok;

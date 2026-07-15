@@ -34,11 +34,27 @@ inline void store_bgr_tail(const float* r, const float* g, const float* b, float
 
 inline void convert_row_f32(const float* r, const float* g, const float* b, float* dst, int width) {
     int x = 0;
+    // Soft prefetch next cache lines (helps a little when still latency-bound).
+    for (; x + 8 <= width; x += 8) {
+        __builtin_prefetch(r + x + 64, 0, 3);
+        __builtin_prefetch(g + x + 64, 0, 3);
+        __builtin_prefetch(b + x + 64, 0, 3);
+        float32x4x3_t v0;
+        v0.val[0] = vld1q_f32(b + x);
+        v0.val[1] = vld1q_f32(g + x);
+        v0.val[2] = vld1q_f32(r + x);
+        vst3q_f32(dst + x * 3, v0);
+        float32x4x3_t v1;
+        v1.val[0] = vld1q_f32(b + x + 4);
+        v1.val[1] = vld1q_f32(g + x + 4);
+        v1.val[2] = vld1q_f32(r + x + 4);
+        vst3q_f32(dst + (x + 4) * 3, v1);
+    }
     for (; x + 4 <= width; x += 4) {
         float32x4x3_t v;
-        v.val[0] = vld1q_f32(b + x);  // B
-        v.val[1] = vld1q_f32(g + x);  // G
-        v.val[2] = vld1q_f32(r + x);  // R
+        v.val[0] = vld1q_f32(b + x);
+        v.val[1] = vld1q_f32(g + x);
+        v.val[2] = vld1q_f32(r + x);
         vst3q_f32(dst + x * 3, v);
     }
     store_bgr_tail(r + x, g + x, b + x, dst + x * 3, width - x);
