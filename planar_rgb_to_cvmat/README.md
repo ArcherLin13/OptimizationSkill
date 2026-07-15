@@ -29,11 +29,13 @@ Expected output:
 
 ```text
 Device: ...
-=== results (GPU vs CPU ref, OpenCV BGR float) ===
-  float separate planes         max_diff=...  kernel=... ms  OK
-  float packed [R|G|B]          max_diff=...  kernel=... ms  OK
-  uchar separate (/255)         max_diff=...  kernel=... ms  OK
+=== results (CPU convert vs GPU kernel, OpenCV BGR float) ===
+  float separate planes         max_diff=...  cpu=X.XX ms  gpu=Y.YY ms  (Z.ZZx)  OK
+  float packed [R|G|B]          max_diff=...  cpu=X.XX ms  gpu=Y.YY ms  (Z.ZZx)  OK
+  uchar separate (/255)         max_diff=...  cpu=X.XX ms  gpu=Y.YY ms  (Z.ZZx)  OK
 ```
+
+`cpu` = host planar→`CV_32FC3` convert time; `gpu` = OpenCL kernel only (no H2D/D2H).
 
 ## Kernels
 

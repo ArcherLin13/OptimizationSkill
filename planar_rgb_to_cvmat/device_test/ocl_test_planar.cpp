@@ -10,6 +10,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -179,10 +180,32 @@ cl_program buildProgram(cl_context ctx, cl_device_id dev, const std::string& src
     return prog;
 }
 
+using Clock = std::chrono::steady_clock;
+
+inline double msSince(Clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+}
+
+// Average wall time of CPU planar -> interleaved BGR conversion.
+template <typename Fn>
+double benchCpuMs(int warmup, int runs, Fn&& fn) {
+    for (int i = 0; i < warmup; ++i) {
+        fn();
+    }
+    double sum = 0.0;
+    for (int i = 0; i < runs; ++i) {
+        const auto t0 = Clock::now();
+        fn();
+        sum += msSince(t0);
+    }
+    return sum / runs;
+}
+
 struct CaseResult {
     const char* name;
     float max_diff;
-    double ms;
+    double gpu_ms;
+    double cpu_ms;
     bool ok;
 };
 
@@ -251,7 +274,8 @@ CaseResult runFloatSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
     CaseResult res{};
     res.name = "float separate planes";
     res.max_diff = diff;
-    res.ms = sum_ms / args.runs;
+    res.gpu_ms = sum_ms / args.runs;
+    res.cpu_ms = 0.0;
     res.ok = diff <= 1e-5f;
     return res;
 }
@@ -316,7 +340,8 @@ CaseResult runFloatPacked(cl_context ctx, cl_command_queue q, cl_program prog, c
     CaseResult res{};
     res.name = "float packed [R|G|B]";
     res.max_diff = diff;
-    res.ms = sum_ms / args.runs;
+    res.gpu_ms = sum_ms / args.runs;
+    res.cpu_ms = 0.0;
     res.ok = diff <= 1e-5f;
     return res;
 }
@@ -389,7 +414,8 @@ CaseResult runUcharSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
     CaseResult res{};
     res.name = "uchar separate (/255)";
     res.max_diff = diff;
-    res.ms = sum_ms / args.runs;
+    res.gpu_ms = sum_ms / args.runs;
+    res.cpu_ms = 0.0;
     res.ok = diff <= 1e-5f;
     return res;
 }
@@ -440,15 +466,31 @@ int main(int argc, char** argv) {
     std::vector<float> ref(static_cast<size_t>(args.width) * args.height * 3);
     cpuRefBgr(r.data(), g.data(), b.data(), ref.data(), args.width, args.height);
 
-    const CaseResult c0 = runFloatSeparate(ctx, q, prog_f, args, r, g, b, ref);
-    const CaseResult c1 = runFloatPacked(ctx, q, prog_f, args, r, g, b, ref);
-    const CaseResult c2 = runUcharSeparate(ctx, q, prog_u8, args);
+    std::vector<float> cpu_dst(ref.size());
+    const double cpu_float_ms = benchCpuMs(args.warmup, args.runs, [&] {
+        cpuRefBgr(r.data(), g.data(), b.data(), cpu_dst.data(), args.width, args.height);
+    });
 
-    std::printf("=== results (GPU vs CPU ref, OpenCV BGR float) ===\n");
+    std::vector<unsigned char> ur, ug, ub;
+    fillUcharPlanes(ur, ug, ub, args.width, args.height);
+    const double cpu_uchar_ms = benchCpuMs(args.warmup, args.runs, [&] {
+        cpuRefBgrUchar(ur.data(), ug.data(), ub.data(), cpu_dst.data(), args.width, args.height);
+    });
+
+    CaseResult c0 = runFloatSeparate(ctx, q, prog_f, args, r, g, b, ref);
+    CaseResult c1 = runFloatPacked(ctx, q, prog_f, args, r, g, b, ref);
+    CaseResult c2 = runUcharSeparate(ctx, q, prog_u8, args);
+    c0.cpu_ms = cpu_float_ms;
+    c1.cpu_ms = cpu_float_ms;
+    c2.cpu_ms = cpu_uchar_ms;
+
+    std::printf("=== results (CPU convert vs GPU kernel, OpenCV BGR float) ===\n");
+    std::printf("  (cpu = host planar->CV_32FC3 convert; gpu = OpenCL kernel only, no H2D/D2H)\n");
     bool all_ok = true;
     for (const CaseResult& c : {c0, c1, c2}) {
-        std::printf("  %-28s  max_diff=%.3e  kernel=%.3f ms  %s\n", c.name, c.max_diff, c.ms,
-                    c.ok ? "OK" : "FAIL");
+        const double speedup = c.gpu_ms > 0.0 ? (c.cpu_ms / c.gpu_ms) : 0.0;
+        std::printf("  %-28s  max_diff=%.3e  cpu=%.3f ms  gpu=%.3f ms  (%.2fx)  %s\n", c.name,
+                    c.max_diff, c.cpu_ms, c.gpu_ms, speedup, c.ok ? "OK" : "FAIL");
         all_ok = all_ok && c.ok;
     }
     std::printf("\n%d x %d x 3 floats = %.1f MB output\n", args.width, args.height,
