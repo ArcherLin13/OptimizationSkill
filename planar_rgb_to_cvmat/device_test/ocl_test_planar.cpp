@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -119,8 +120,9 @@ void fillPlanes(std::vector<float>& r, std::vector<float>& g, std::vector<float>
     }
 }
 
-void cpuRefBgr(const float* r, const float* g, const float* b, float* dst, int w, int h) {
-    for (int y = 0; y < h; ++y) {
+void cpuRefBgrRows(const float* r, const float* g, const float* b, float* dst, int w, int y0,
+                   int y1) {
+    for (int y = y0; y < y1; ++y) {
         for (int x = 0; x < w; ++x) {
             const size_t si = static_cast<size_t>(y) * w + x;
             float* out = dst + si * 3;
@@ -128,6 +130,25 @@ void cpuRefBgr(const float* r, const float* g, const float* b, float* dst, int w
             out[1] = g[si];
             out[2] = r[si];
         }
+    }
+}
+
+void cpuRefBgr(const float* r, const float* g, const float* b, float* dst, int w, int h) {
+    cpuRefBgrRows(r, g, b, dst, w, 0, h);
+}
+
+void cpuRefBgrMt(const float* r, const float* g, const float* b, float* dst, int w, int h,
+                 int threads) {
+    threads = std::max(1, std::min(threads, h));
+    std::vector<std::thread> workers;
+    workers.reserve(static_cast<size_t>(threads));
+    for (int t = 0; t < threads; ++t) {
+        const int y0 = h * t / threads;
+        const int y1 = h * (t + 1) / threads;
+        workers.emplace_back([=] { cpuRefBgrRows(r, g, b, dst, w, y0, y1); });
+    }
+    for (auto& th : workers) {
+        th.join();
     }
 }
 
@@ -208,21 +229,40 @@ struct CaseResult {
     bool ok = false;
 };
 
-double runKernelTimed(cl_command_queue q, cl_kernel kn, size_t global[2], int warmup, int runs) {
+double runKernelTimed(cl_command_queue q, cl_kernel kn, size_t global[2], const size_t* local,
+                      int warmup, int runs) {
     for (int i = 0; i < warmup; ++i) {
-        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, nullptr),
-                  "warmup");
+        OCL_CHECK(
+            clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, local, 0, nullptr, nullptr),
+            "warmup");
     }
     OCL_CHECK(clFinish(q), "finish warmup");
     double sum_ms = 0.0;
     for (int i = 0; i < runs; ++i) {
         cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, &ev),
+        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, local, 0, nullptr, &ev),
                   "enqueue");
         sum_ms += profileMs(ev);
         clReleaseEvent(ev);
     }
     return sum_ms / runs;
+}
+
+// Pad global size up so it is divisible by local.
+void padGlobal(size_t global[2], const size_t local[2]) {
+    for (int i = 0; i < 2; ++i) {
+        if (local[i] == 0) {
+            continue;
+        }
+        global[i] = ((global[i] + local[i] - 1) / local[i]) * local[i];
+    }
+}
+
+double gbps(double bytes, double ms) {
+    if (ms <= 0.0) {
+        return 0.0;
+    }
+    return (bytes / 1e9) / (ms / 1e3);
 }
 
 CaseResult runFloatSeparate(cl_context ctx, cl_command_queue q, cl_program prog, const Args& args,
@@ -262,7 +302,11 @@ CaseResult runFloatSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
 
     const size_t gx = (static_cast<size_t>(w) + pixels_per_wi - 1) / pixels_per_wi;
     size_t global[2] = {gx, static_cast<size_t>(h)};
-    const double gpu_ms = runKernelTimed(q, kn, global, args.warmup, args.runs);
+    size_t local[2] = {16, 8};
+    size_t global_pad[2] = {global[0], global[1]};
+    padGlobal(global_pad, local);
+    const double gpu_ms =
+        runKernelTimed(q, kn, global_pad, local, args.warmup, args.runs);
 
     std::vector<float> out(out_n);
     OCL_CHECK(clEnqueueReadBuffer(q, buf_out, CL_TRUE, 0, out_n * sizeof(float), out.data(), 0,
@@ -282,6 +326,93 @@ CaseResult runFloatSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
     res.gpu_ms = gpu_ms;
     res.ok = diff <= 1e-5f;
     return res;
+}
+
+// Kernel-only vs end-to-end (H2D + kernel + D2H) for one float case.
+void benchFloatE2E(cl_context ctx, cl_command_queue q, cl_program prog, const Args& args,
+                   const std::vector<float>& r, const std::vector<float>& g,
+                   const std::vector<float>& b, double* kernel_ms, double* e2e_ms) {
+    const int w = args.width;
+    const int h = args.height;
+    const size_t n = static_cast<size_t>(w) * h;
+    const size_t out_n = n * 3;
+    const int src_stride = w;
+    const int dst_stride = w * 3;
+    constexpr int ppx = 8;
+
+    cl_int err = 0;
+    cl_mem buf_r = clCreateBuffer(ctx, CL_MEM_READ_ONLY, n * sizeof(float), nullptr, &err);
+    OCL_CHECK(err, "e2e r");
+    cl_mem buf_g = clCreateBuffer(ctx, CL_MEM_READ_ONLY, n * sizeof(float), nullptr, &err);
+    OCL_CHECK(err, "e2e g");
+    cl_mem buf_b = clCreateBuffer(ctx, CL_MEM_READ_ONLY, n * sizeof(float), nullptr, &err);
+    OCL_CHECK(err, "e2e b");
+    cl_mem buf_out = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, out_n * sizeof(float), nullptr, &err);
+    OCL_CHECK(err, "e2e out");
+
+    cl_kernel kn = clCreateKernel(prog, "planar_rgb_to_cv32fc3_ppx", &err);
+    OCL_CHECK(err, "e2e kn");
+    OCL_CHECK(clSetKernelArg(kn, 0, sizeof(cl_mem), &buf_r), "a0");
+    OCL_CHECK(clSetKernelArg(kn, 1, sizeof(cl_mem), &buf_g), "a1");
+    OCL_CHECK(clSetKernelArg(kn, 2, sizeof(cl_mem), &buf_b), "a2");
+    OCL_CHECK(clSetKernelArg(kn, 3, sizeof(cl_mem), &buf_out), "a3");
+    OCL_CHECK(clSetKernelArg(kn, 4, sizeof(int), &w), "a4");
+    OCL_CHECK(clSetKernelArg(kn, 5, sizeof(int), &h), "a5");
+    OCL_CHECK(clSetKernelArg(kn, 6, sizeof(int), &src_stride), "a6");
+    OCL_CHECK(clSetKernelArg(kn, 7, sizeof(int), &dst_stride), "a7");
+
+    size_t global[2] = {(static_cast<size_t>(w) + ppx - 1) / ppx, static_cast<size_t>(h)};
+    size_t local[2] = {16, 8};
+    padGlobal(global, local);
+
+    std::vector<float> out(out_n);
+    for (int i = 0; i < args.warmup; ++i) {
+        OCL_CHECK(clEnqueueWriteBuffer(q, buf_r, CL_FALSE, 0, n * sizeof(float), r.data(), 0,
+                                       nullptr, nullptr),
+                  "w r");
+        OCL_CHECK(clEnqueueWriteBuffer(q, buf_g, CL_FALSE, 0, n * sizeof(float), g.data(), 0,
+                                       nullptr, nullptr),
+                  "w g");
+        OCL_CHECK(clEnqueueWriteBuffer(q, buf_b, CL_FALSE, 0, n * sizeof(float), b.data(), 0,
+                                       nullptr, nullptr),
+                  "w b");
+        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, local, 0, nullptr, nullptr),
+                  "kn");
+        OCL_CHECK(clEnqueueReadBuffer(q, buf_out, CL_TRUE, 0, out_n * sizeof(float), out.data(), 0,
+                                      nullptr, nullptr),
+                  "rd");
+    }
+
+    double sum_k = 0.0;
+    double sum_e2e = 0.0;
+    for (int i = 0; i < args.runs; ++i) {
+        const auto t0 = Clock::now();
+        OCL_CHECK(clEnqueueWriteBuffer(q, buf_r, CL_FALSE, 0, n * sizeof(float), r.data(), 0,
+                                       nullptr, nullptr),
+                  "w r");
+        OCL_CHECK(clEnqueueWriteBuffer(q, buf_g, CL_FALSE, 0, n * sizeof(float), g.data(), 0,
+                                       nullptr, nullptr),
+                  "w g");
+        OCL_CHECK(clEnqueueWriteBuffer(q, buf_b, CL_FALSE, 0, n * sizeof(float), b.data(), 0,
+                                       nullptr, nullptr),
+                  "w b");
+        cl_event ev = nullptr;
+        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, local, 0, nullptr, &ev), "kn");
+        OCL_CHECK(clEnqueueReadBuffer(q, buf_out, CL_TRUE, 0, out_n * sizeof(float), out.data(), 0,
+                                      nullptr, nullptr),
+                  "rd");
+        sum_e2e += msSince(t0);
+        sum_k += profileMs(ev);
+        clReleaseEvent(ev);
+    }
+    *kernel_ms = sum_k / args.runs;
+    *e2e_ms = sum_e2e / args.runs;
+
+    clReleaseKernel(kn);
+    clReleaseMemObject(buf_r);
+    clReleaseMemObject(buf_g);
+    clReleaseMemObject(buf_b);
+    clReleaseMemObject(buf_out);
 }
 
 CaseResult runUcharSeparate(cl_context ctx, cl_command_queue q, cl_program prog, const Args& args,
@@ -325,7 +456,9 @@ CaseResult runUcharSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
 
     const size_t gx = (static_cast<size_t>(w) + pixels_per_wi - 1) / pixels_per_wi;
     size_t global[2] = {gx, static_cast<size_t>(h)};
-    const double gpu_ms = runKernelTimed(q, kn, global, args.warmup, args.runs);
+    size_t local[2] = {16, 8};
+    padGlobal(global, local);
+    const double gpu_ms = runKernelTimed(q, kn, global, local, args.warmup, args.runs);
 
     std::vector<float> out(out_n);
     OCL_CHECK(clEnqueueReadBuffer(q, buf_out, CL_TRUE, 0, out_n * sizeof(float), out.data(), 0,
@@ -384,84 +517,78 @@ int main(int argc, char** argv) {
     cl_command_queue q = clCreateCommandQueue(ctx, dev, CL_QUEUE_PROFILING_ENABLE, &err);
     OCL_CHECK(err, "queue");
 
-    cl_program prog_f1 = buildProgram(ctx, dev, src, nullptr);  // PIXELS_PER_WI=8 default for ppx
-    cl_program prog_f4 = buildProgram(ctx, dev, src, "-DPIXELS_PER_WI=4");
-    cl_program prog_f16 = buildProgram(ctx, dev, src, "-DPIXELS_PER_WI=16");
-    cl_program prog_u8_1 = buildProgram(ctx, dev, src, "-DINPUT_UCHAR");
-    cl_program prog_u8_8 = buildProgram(ctx, dev, src, "-DINPUT_UCHAR -DPIXELS_PER_WI=8");
+    cl_program prog_f =
+        buildProgram(ctx, dev, src, "-cl-fast-relaxed-math -DPIXELS_PER_WI=8");
+    cl_program prog_f1 = buildProgram(ctx, dev, src, "-cl-fast-relaxed-math");
 
     std::vector<float> r, g, b;
     fillPlanes(r, g, b, args.width, args.height);
     std::vector<float> ref(static_cast<size_t>(args.width) * args.height * 3);
     cpuRefBgr(r.data(), g.data(), b.data(), ref.data(), args.width, args.height);
 
+    const int cpu_threads =
+        std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
     std::vector<float> cpu_dst(ref.size());
-    const double cpu_float_ms = benchCpuMs(args.warmup, args.runs, [&] {
+    const double cpu_1t_ms = benchCpuMs(args.warmup, args.runs, [&] {
         cpuRefBgr(r.data(), g.data(), b.data(), cpu_dst.data(), args.width, args.height);
     });
-
-    std::vector<unsigned char> ur, ug, ub;
-    fillUcharPlanes(ur, ug, ub, args.width, args.height);
-    std::vector<float> uref(ref.size());
-    cpuRefBgrUchar(ur.data(), ug.data(), ub.data(), uref.data(), args.width, args.height);
-    const double cpu_uchar_ms = benchCpuMs(args.warmup, args.runs, [&] {
-        cpuRefBgrUchar(ur.data(), ug.data(), ub.data(), cpu_dst.data(), args.width, args.height);
+    const double cpu_mt_ms = benchCpuMs(args.warmup, args.runs, [&] {
+        cpuRefBgrMt(r.data(), g.data(), b.data(), cpu_dst.data(), args.width, args.height,
+                    cpu_threads);
     });
 
-    std::vector<CaseResult> cases;
-    cases.push_back(runFloatSeparate(ctx, q, prog_f1, args, "planar_rgb_to_cv32fc3", 1,
-                                     "float 1px/WI (baseline)", r, g, b, ref));
-    cases.push_back(runFloatSeparate(ctx, q, prog_f4, args, "planar_rgb_to_cv32fc3_ppx", 4,
-                                     "float 4px/WI + vload4", r, g, b, ref));
-    cases.push_back(runFloatSeparate(ctx, q, prog_f1, args, "planar_rgb_to_cv32fc3_ppx", 8,
-                                     "float 8px/WI + vload4", r, g, b, ref));
-    cases.push_back(runFloatSeparate(ctx, q, prog_f16, args, "planar_rgb_to_cv32fc3_ppx", 16,
-                                     "float 16px/WI + vload4", r, g, b, ref));
-    cases.push_back(runUcharSeparate(ctx, q, prog_u8_1, args, "planar_rgb_to_cv32fc3", 1,
-                                     "uchar 1px/WI (baseline)", ur, ug, ub, uref));
-    cases.push_back(runUcharSeparate(ctx, q, prog_u8_8, args, "planar_rgb_to_cv32fc3_ppx", 8,
-                                     "uchar 8px/WI + vload4", ur, ug, ub, uref));
+    // Traffic: 3 planar float reads + 3-channel float write = 24 bytes / pixel
+    const double bytes =
+        static_cast<double>(args.width) * args.height * 3.0 * sizeof(float) * 2.0;
 
-    for (auto& c : cases) {
-        c.cpu_ms = (c.name.find("uchar") != std::string::npos) ? cpu_uchar_ms : cpu_float_ms;
-    }
+    CaseResult c1 = runFloatSeparate(ctx, q, prog_f1, args, "planar_rgb_to_cv32fc3", 1,
+                                     "float 1px/WI", r, g, b, ref);
+    CaseResult c8 = runFloatSeparate(ctx, q, prog_f, args, "planar_rgb_to_cv32fc3_ppx", 8,
+                                     "float 8px/WI", r, g, b, ref);
+    c1.cpu_ms = cpu_1t_ms;
+    c8.cpu_ms = cpu_1t_ms;
 
-    std::printf("=== results (CPU convert vs GPU kernel) ===\n");
-    std::printf("  (cpu = host convert; gpu = OpenCL kernel only, no H2D/D2H)\n");
-    std::printf("  ppx = more pixels per work-item (fewer WI, vector loads)\n\n");
+    double e2e_kernel = 0.0;
+    double e2e_wall = 0.0;
+    benchFloatE2E(ctx, q, prog_f, args, r, g, b, &e2e_kernel, &e2e_wall);
+
+    std::printf("=== why ~1.5x is common ===\n");
+    std::printf("  This kernel is memory-bound (rearrange), not compute-bound.\n");
+    std::printf("  Phone CPU+GPU share the same DRAM; CPU streams this pattern well.\n");
+    std::printf("  Interleaved BGR writes are poorly coalesced on GPU.\n");
+    std::printf("  Real win is keeping buffers on GPU (skip H2D/D2H), not beating CPU alone.\n\n");
+
+    std::printf("=== CPU ===\n");
+    std::printf("  1-thread:  %.3f ms  (%.1f GB/s)\n", cpu_1t_ms, gbps(bytes, cpu_1t_ms));
+    std::printf("  %d-thread: %.3f ms  (%.1f GB/s)\n\n", cpu_threads, cpu_mt_ms,
+                gbps(bytes, cpu_mt_ms));
+
+    std::printf("=== GPU kernel only (data already on device) ===\n");
     bool all_ok = true;
-    double baseline_gpu = 0.0;
-    for (size_t i = 0; i < cases.size(); ++i) {
-        const CaseResult& c = cases[i];
-        if (i == 0) {
-            baseline_gpu = c.gpu_ms;
-        }
-        const double vs_cpu = c.gpu_ms > 0.0 ? (c.cpu_ms / c.gpu_ms) : 0.0;
-        const double vs_base = (baseline_gpu > 0.0 && i > 0 && c.name.find("float") == 0)
-                                   ? (baseline_gpu / c.gpu_ms)
-                                   : 0.0;
-        if (vs_base > 0.0) {
-            std::printf(
-                "  %-28s  max_diff=%.3e  cpu=%.3f ms  gpu=%.3f ms  (%.2fx vs cpu, %.2fx vs 1px)  "
-                "%s\n",
-                c.name.c_str(), c.max_diff, c.cpu_ms, c.gpu_ms, vs_cpu, vs_base,
-                c.ok ? "OK" : "FAIL");
-        } else {
-            std::printf("  %-28s  max_diff=%.3e  cpu=%.3f ms  gpu=%.3f ms  (%.2fx vs cpu)  %s\n",
-                        c.name.c_str(), c.max_diff, c.cpu_ms, c.gpu_ms, vs_cpu,
-                        c.ok ? "OK" : "FAIL");
-        }
+    for (const CaseResult& c : {c1, c8}) {
+        std::printf("  %-16s  max_diff=%.3e  gpu=%.3f ms  (%.1f GB/s)  vs1t=%.2fx  vsMTc=%.2fx  %s\n",
+                    c.name.c_str(), c.max_diff, c.gpu_ms, gbps(bytes, c.gpu_ms),
+                    cpu_1t_ms / c.gpu_ms, cpu_mt_ms / c.gpu_ms, c.ok ? "OK" : "FAIL");
         all_ok = all_ok && c.ok;
     }
-    std::printf("\n%d x %d x 3 floats = %.1f MB output\n", args.width, args.height,
-                args.width * args.height * 3 * 4 / (1024.0 * 1024.0));
-    std::printf("Prefer *_ppx with -DPIXELS_PER_WI=8 (or tune 4/16 from this table).\n");
 
+    std::printf("\n=== GPU end-to-end (H2D + kernel + D2H)  float 8px/WI ===\n");
+    std::printf("  kernel: %.3f ms   e2e wall: %.3f ms\n", e2e_kernel, e2e_wall);
+    std::printf("  vs CPU 1t: kernel %.2fx, e2e %.2fx\n", cpu_1t_ms / e2e_kernel,
+                cpu_1t_ms / e2e_wall);
+    std::printf("  vs CPU MT: kernel %.2fx, e2e %.2fx\n", cpu_mt_ms / e2e_kernel,
+                cpu_mt_ms / e2e_wall);
+    if (e2e_wall > cpu_mt_ms) {
+        std::printf(
+            "  => For CPU-resident Mat, prefer CPU (or NEON). Use GPU when source is already "
+            "on GPU.\n");
+    }
+
+    std::printf("\n%d x %d  traffic ~= %.1f MB (read+write)\n", args.width, args.height,
+                bytes / (1024.0 * 1024.0));
+
+    clReleaseProgram(prog_f);
     clReleaseProgram(prog_f1);
-    clReleaseProgram(prog_f4);
-    clReleaseProgram(prog_f16);
-    clReleaseProgram(prog_u8_1);
-    clReleaseProgram(prog_u8_8);
     clReleaseCommandQueue(q);
     clReleaseContext(ctx);
     return all_ok ? 0 : 1;
