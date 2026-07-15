@@ -13,10 +13,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -39,6 +42,7 @@ struct Args {
     int height = 2160;
     int runs = 20;
     int warmup = 3;
+    bool e2e = false;  // off by default: only time convert / kernel
 };
 
 Args parseArgs(int argc, char** argv) {
@@ -54,10 +58,12 @@ Args parseArgs(int argc, char** argv) {
             a.runs = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
             a.warmup = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--e2e") == 0) {
+            a.e2e = true;
         } else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
             std::printf(
-                "Usage: %s [--kernel PATH] [--width W] [--height H] [--runs N]\n"
-                "  Planar R|G|B -> CV_32FC3 BGR float on OpenCL GPU.\n",
+                "Usage: %s [--kernel PATH] [--width W] [--height H] [--runs N] [--e2e]\n"
+                "  Default timings are convert/kernel only (no H2D/D2H, no thread spawn).\n",
                 argv[0]);
             std::exit(0);
         }
@@ -223,18 +229,103 @@ inline double msSince(Clock::time_point t0) {
 }
 
 template <typename Fn>
-double benchCpuMs(int warmup, int runs, Fn&& fn) {
+double benchConvertMs(int warmup, int runs, Fn&& convert_only) {
     for (int i = 0; i < warmup; ++i) {
-        fn();
+        convert_only();
     }
     double sum = 0.0;
     for (int i = 0; i < runs; ++i) {
         const auto t0 = Clock::now();
-        fn();
+        convert_only();  // timed region: convert call only
         sum += msSince(t0);
     }
     return sum / runs;
 }
+
+// Persistent workers so MT timing excludes thread create/join.
+class ConvertPool {
+public:
+    using Job = std::function<void(int y0, int y1)>;
+
+    ConvertPool(int threads, int height) : threads_(std::max(1, threads)), height_(height) {
+        workers_.reserve(static_cast<size_t>(threads_));
+        for (int t = 0; t < threads_; ++t) {
+            workers_.emplace_back([this, t] { workerMain(t); });
+        }
+    }
+
+    ~ConvertPool() {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            stop_ = true;
+            ++epoch_;
+        }
+        cv_.notify_all();
+        for (auto& th : workers_) {
+            th.join();
+        }
+    }
+
+    double bench(int warmup, int runs, Job job) {
+        job_ = std::move(job);
+        for (int i = 0; i < warmup; ++i) {
+            runOnce();
+        }
+        double sum = 0.0;
+        for (int i = 0; i < runs; ++i) {
+            const auto t0 = Clock::now();
+            runOnce();  // timed: convert work only (threads already alive)
+            sum += msSince(t0);
+        }
+        return sum / runs;
+    }
+
+private:
+    void runOnce() {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            pending_ = threads_;
+            ++epoch_;
+        }
+        cv_.notify_all();
+        std::unique_lock<std::mutex> lock(mu_);
+        done_cv_.wait(lock, [&] { return pending_ == 0; });
+    }
+
+    void workerMain(int tid) {
+        int seen = 0;
+        for (;;) {
+            std::unique_lock<std::mutex> lock(mu_);
+            cv_.wait(lock, [&] { return epoch_ != seen || stop_; });
+            if (stop_) {
+                return;
+            }
+            seen = epoch_;
+            Job job = job_;
+            lock.unlock();
+
+            const int y0 = height_ * tid / threads_;
+            const int y1 = height_ * (tid + 1) / threads_;
+            job(y0, y1);
+
+            lock.lock();
+            if (--pending_ == 0) {
+                done_cv_.notify_one();
+            }
+        }
+    }
+
+    int threads_ = 1;
+    int height_ = 0;
+    std::vector<std::thread> workers_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::condition_variable done_cv_;
+    int epoch_ = 0;
+    int pending_ = 0;
+    bool stop_ = false;
+    Job job_;
+};
 
 struct CaseResult {
     std::string name;
@@ -543,80 +634,71 @@ int main(int argc, char** argv) {
 
     const int cpu_threads =
         std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
-    std::vector<float> cpu_dst(ref.size());
-    const double cpu_1t_ms = benchCpuMs(args.warmup, args.runs, [&] {
-        cpuRefBgr(r.data(), g.data(), b.data(), cpu_dst.data(), args.width, args.height);
-    });
-    const double cpu_mt_ms = benchCpuMs(args.warmup, args.runs, [&] {
-        cpuRefBgrMt(r.data(), g.data(), b.data(), cpu_dst.data(), args.width, args.height,
-                    cpu_threads);
-    });
-
     const int src_stride = args.width;
     const int dst_stride = args.width * 3;
+    std::vector<float> cpu_dst(ref.size());
     std::vector<float> neon_dst(ref.size(), 0.f);
+
+    // Correctness outside timed region
     neon_planar_rgb_f32_to_cv32fc3(r.data(), g.data(), b.data(), neon_dst.data(), args.width,
                                    args.height, src_stride, dst_stride);
     const float neon_diff = maxAbsDiff(neon_dst.data(), ref.data(), ref.size());
     const bool neon_ok = neon_diff <= 1e-5f;
 
-    const double neon_1t_ms = benchCpuMs(args.warmup, args.runs, [&] {
+    // --- convert-only timings ---
+    const double cpu_1t_ms = benchConvertMs(args.warmup, args.runs, [&] {
+        cpuRefBgr(r.data(), g.data(), b.data(), cpu_dst.data(), args.width, args.height);
+    });
+    const double neon_1t_ms = benchConvertMs(args.warmup, args.runs, [&] {
         neon_planar_rgb_f32_to_cv32fc3(r.data(), g.data(), b.data(), neon_dst.data(), args.width,
                                        args.height, src_stride, dst_stride);
     });
-    const double neon_mt_ms = benchCpuMs(args.warmup, args.runs, [&] {
-        neon_planar_rgb_f32_to_cv32fc3_mt(r.data(), g.data(), b.data(), neon_dst.data(),
-                                          args.width, args.height, src_stride, dst_stride,
-                                          cpu_threads);
+
+    ConvertPool pool(cpu_threads, args.height);
+    const double cpu_mt_ms = pool.bench(args.warmup, args.runs, [&](int y0, int y1) {
+        cpuRefBgrRows(r.data(), g.data(), b.data(), cpu_dst.data(), args.width, y0, y1);
+    });
+    const double neon_mt_ms = pool.bench(args.warmup, args.runs, [&](int y0, int y1) {
+        const int rows = y1 - y0;
+        neon_planar_rgb_f32_to_cv32fc3(r.data() + y0 * src_stride, g.data() + y0 * src_stride,
+                                       b.data() + y0 * src_stride, neon_dst.data() + y0 * dst_stride,
+                                       args.width, rows, src_stride, dst_stride);
     });
 
-    // Traffic: 3 planar float reads + 3-channel float write = 24 bytes / pixel
     const double bytes =
         static_cast<double>(args.width) * args.height * 3.0 * sizeof(float) * 2.0;
 
+    // GPU: CL event profiling = kernel convert only (buffers already on device)
     CaseResult c1 = runFloatSeparate(ctx, q, prog_f1, args, "planar_rgb_to_cv32fc3", 1,
                                      "float 1px/WI", r, g, b, ref);
     CaseResult c8 = runFloatSeparate(ctx, q, prog_f, args, "planar_rgb_to_cv32fc3_ppx", 8,
                                      "float 8px/WI", r, g, b, ref);
 
-    double e2e_kernel = 0.0;
-    double e2e_wall = 0.0;
-    benchFloatE2E(ctx, q, prog_f, args, r, g, b, &e2e_kernel, &e2e_wall);
+    std::printf("NEON: %s\n", neon_planar_available() ? "enabled" : "fallback scalar");
+    std::printf("Timing: convert only (CPU wall around convert; GPU = CL kernel profiling)\n");
+    std::printf("         MT uses persistent threads (spawn/join NOT counted)\n\n");
 
-    std::printf("NEON: %s\n\n", neon_planar_available() ? "enabled (AArch64 intrinsics)"
-                                                         : "fallback scalar");
+    std::printf("=== convert duration (ms) ===\n");
+    std::printf("  %-12s  %8s  %8s\n", "", "1-thread", "N-thread");
+    std::printf("  %-12s  %8.3f  %8.3f\n", "scalar", cpu_1t_ms, cpu_mt_ms);
+    std::printf("  %-12s  %8.3f  %8.3f  max_diff=%.3e %s\n", "NEON", neon_1t_ms, neon_mt_ms,
+                neon_diff, neon_ok ? "OK" : "FAIL");
+    std::printf("  %-12s  %8.3f  %8s\n", "GPU 1px", c1.gpu_ms, "-");
+    std::printf("  %-12s  %8.3f  %8s\n", "GPU 8px", c8.gpu_ms, "-");
+    std::printf("\n  N = %d threads\n", cpu_threads);
+    std::printf("  NEON vs scalar (1t): %.2fx\n", cpu_1t_ms / neon_1t_ms);
+    std::printf("  NEON vs scalar (Nt): %.2fx\n", cpu_mt_ms / neon_mt_ms);
+    std::printf("  GPU8 vs NEON 1t:     %.2fx\n", neon_1t_ms / c8.gpu_ms);
+    std::printf("  GPU8 vs NEON Nt:     %.2fx\n", neon_mt_ms / c8.gpu_ms);
 
-    std::printf("=== CPU / NEON ===\n");
-    std::printf("  Note: this convert is DRAM-bound (~24 B/pix). NEON rarely helps much.\n");
-    std::printf("  If scalar≈NEON before, clang likely auto-vectorized scalar already.\n");
-    std::printf("  scalar below uses #pragma clang loop vectorize(disable).\n");
-    std::printf("  scalar 1t:  %.3f ms  (%.1f GB/s)\n", cpu_1t_ms, gbps(bytes, cpu_1t_ms));
-    std::printf("  scalar %dt: %.3f ms  (%.1f GB/s)\n", cpu_threads, cpu_mt_ms,
-                gbps(bytes, cpu_mt_ms));
-    std::printf("  NEON 1t:    %.3f ms  (%.1f GB/s)  max_diff=%.3e  %s  (vs scalar1t %.2fx)\n",
-                neon_1t_ms, gbps(bytes, neon_1t_ms), neon_diff, neon_ok ? "OK" : "FAIL",
-                cpu_1t_ms / neon_1t_ms);
-    std::printf("  NEON %dt:   %.3f ms  (%.1f GB/s)  (vs scalarMT %.2fx)\n\n", cpu_threads,
-                neon_mt_ms, gbps(bytes, neon_mt_ms), cpu_mt_ms / neon_mt_ms);
+    bool all_ok = neon_ok && c1.ok && c8.ok;
 
-    std::printf("=== GPU kernel only (data already on device) ===\n");
-    bool all_ok = neon_ok;
-    for (const CaseResult& c : {c1, c8}) {
-        std::printf(
-            "  %-16s  max_diff=%.3e  gpu=%.3f ms  (%.1f GB/s)  vsNEON1t=%.2fx  vsNEONMT=%.2fx  %s\n",
-            c.name.c_str(), c.max_diff, c.gpu_ms, gbps(bytes, c.gpu_ms), neon_1t_ms / c.gpu_ms,
-            neon_mt_ms / c.gpu_ms, c.ok ? "OK" : "FAIL");
-        all_ok = all_ok && c.ok;
-    }
-
-    std::printf("\n=== GPU end-to-end (H2D + kernel + D2H)  float 8px/WI ===\n");
-    std::printf("  kernel: %.3f ms   e2e wall: %.3f ms\n", e2e_kernel, e2e_wall);
-    std::printf("  vs NEON 1t: kernel %.2fx, e2e %.2fx\n", neon_1t_ms / e2e_kernel,
-                neon_1t_ms / e2e_wall);
-    std::printf("  vs NEON MT: kernel %.2fx, e2e %.2fx\n", neon_mt_ms / e2e_kernel,
-                neon_mt_ms / e2e_wall);
-    if (e2e_wall > neon_mt_ms) {
-        std::printf("  => For host Mat, prefer NEON. Use GPU when data already on GPU.\n");
+    if (args.e2e) {
+        double e2e_kernel = 0.0;
+        double e2e_wall = 0.0;
+        benchFloatE2E(ctx, q, prog_f, args, r, g, b, &e2e_kernel, &e2e_wall);
+        std::printf("\n=== optional e2e (H2D + kernel + D2H), not convert-only ===\n");
+        std::printf("  kernel=%.3f ms  e2e=%.3f ms\n", e2e_kernel, e2e_wall);
     }
 
     std::printf("\n%d x %d  traffic ~= %.1f MB (read+write)\n", args.width, args.height,
