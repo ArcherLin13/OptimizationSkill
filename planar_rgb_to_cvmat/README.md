@@ -20,7 +20,8 @@ cd planar_rgb_to_cvmat
 Optional size / runs:
 
 ```powershell
-.\scripts\run_device.ps1 -Width 1280 -Height 720 -Runs 30
+.\scripts\run_device.ps1 -Width 3840 -Height 2160 -Runs 30
+# default is already 3840x2160 (4K)
 ```
 
 Default remote path: `/data/local/tmp/planar_rgb`

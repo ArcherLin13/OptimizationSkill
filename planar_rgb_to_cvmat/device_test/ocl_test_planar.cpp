@@ -33,8 +33,8 @@ namespace {
 
 struct Args {
     std::string kernel_path = "planar_rgb_to_cv32fc3.cl";
-    int width = 1920;
-    int height = 1080;
+    int width = 3840;
+    int height = 2160;
     int runs = 20;
     int warmup = 3;
 };

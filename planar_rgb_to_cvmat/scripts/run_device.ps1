@@ -1,8 +1,8 @@
 param(
     [string]$OhosNative = "",
     [string]$RemoteDir = "/data/local/tmp/planar_rgb",
-    [int]$Width = 1920,
-    [int]$Height = 1080,
+    [int]$Width = 3840,
+    [int]$Height = 2160,
     [int]$Runs = 20
 )
 
