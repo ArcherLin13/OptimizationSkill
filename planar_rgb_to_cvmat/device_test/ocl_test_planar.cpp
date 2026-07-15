@@ -1,5 +1,5 @@
 // HarmonyOS OpenCL: planar RGB -> CV_32FC3 (interleaved BGR float).
-// Builds CPU reference, runs GPU kernel, checks max abs error, profiles kernel time.
+// Compares baseline (1 px/WI) vs ppx kernels (N px/WI + float4/uchar4 loads).
 //
 // Usage:
 //   ./ocl_test_planar [--kernel PATH] [--width W] [--height H] [--runs N]
@@ -186,7 +186,6 @@ inline double msSince(Clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
-// Average wall time of CPU planar -> interleaved BGR conversion.
 template <typename Fn>
 double benchCpuMs(int warmup, int runs, Fn&& fn) {
     for (int i = 0; i < warmup; ++i) {
@@ -202,14 +201,32 @@ double benchCpuMs(int warmup, int runs, Fn&& fn) {
 }
 
 struct CaseResult {
-    const char* name;
-    float max_diff;
-    double gpu_ms;
-    double cpu_ms;
-    bool ok;
+    std::string name;
+    float max_diff = 0.f;
+    double gpu_ms = 0.0;
+    double cpu_ms = 0.0;
+    bool ok = false;
 };
 
+double runKernelTimed(cl_command_queue q, cl_kernel kn, size_t global[2], int warmup, int runs) {
+    for (int i = 0; i < warmup; ++i) {
+        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, nullptr),
+                  "warmup");
+    }
+    OCL_CHECK(clFinish(q), "finish warmup");
+    double sum_ms = 0.0;
+    for (int i = 0; i < runs; ++i) {
+        cl_event ev = nullptr;
+        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, &ev),
+                  "enqueue");
+        sum_ms += profileMs(ev);
+        clReleaseEvent(ev);
+    }
+    return sum_ms / runs;
+}
+
 CaseResult runFloatSeparate(cl_context ctx, cl_command_queue q, cl_program prog, const Args& args,
+                            const char* kernel_name, int pixels_per_wi, const char* label,
                             const std::vector<float>& r, const std::vector<float>& g,
                             const std::vector<float>& b, const std::vector<float>& ref) {
     const int w = args.width;
@@ -232,8 +249,8 @@ CaseResult runFloatSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
     cl_mem buf_out = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, out_n * sizeof(float), nullptr, &err);
     OCL_CHECK(err, "buf_out");
 
-    cl_kernel kn = clCreateKernel(prog, "planar_rgb_to_cv32fc3", &err);
-    OCL_CHECK(err, "kernel");
+    cl_kernel kn = clCreateKernel(prog, kernel_name, &err);
+    OCL_CHECK(err, kernel_name);
     OCL_CHECK(clSetKernelArg(kn, 0, sizeof(cl_mem), &buf_r), "arg0");
     OCL_CHECK(clSetKernelArg(kn, 1, sizeof(cl_mem), &buf_g), "arg1");
     OCL_CHECK(clSetKernelArg(kn, 2, sizeof(cl_mem), &buf_b), "arg2");
@@ -243,21 +260,9 @@ CaseResult runFloatSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
     OCL_CHECK(clSetKernelArg(kn, 6, sizeof(int), &src_stride), "arg6");
     OCL_CHECK(clSetKernelArg(kn, 7, sizeof(int), &dst_stride), "arg7");
 
-    size_t global[2] = {static_cast<size_t>(w), static_cast<size_t>(h)};
-    for (int i = 0; i < args.warmup; ++i) {
-        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, nullptr),
-                  "warmup");
-    }
-    OCL_CHECK(clFinish(q), "finish warmup");
-
-    double sum_ms = 0.0;
-    for (int i = 0; i < args.runs; ++i) {
-        cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, &ev),
-                  "enqueue");
-        sum_ms += profileMs(ev);
-        clReleaseEvent(ev);
-    }
+    const size_t gx = (static_cast<size_t>(w) + pixels_per_wi - 1) / pixels_per_wi;
+    size_t global[2] = {gx, static_cast<size_t>(h)};
+    const double gpu_ms = runKernelTimed(q, kn, global, args.warmup, args.runs);
 
     std::vector<float> out(out_n);
     OCL_CHECK(clEnqueueReadBuffer(q, buf_out, CL_TRUE, 0, out_n * sizeof(float), out.data(), 0,
@@ -271,109 +276,44 @@ CaseResult runFloatSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
     clReleaseMemObject(buf_b);
     clReleaseMemObject(buf_out);
 
-    CaseResult res{};
-    res.name = "float separate planes";
+    CaseResult res;
+    res.name = label;
     res.max_diff = diff;
-    res.gpu_ms = sum_ms / args.runs;
-    res.cpu_ms = 0.0;
+    res.gpu_ms = gpu_ms;
     res.ok = diff <= 1e-5f;
     return res;
 }
 
-CaseResult runFloatPacked(cl_context ctx, cl_command_queue q, cl_program prog, const Args& args,
-                          const std::vector<float>& r, const std::vector<float>& g,
-                          const std::vector<float>& b, const std::vector<float>& ref) {
+CaseResult runUcharSeparate(cl_context ctx, cl_command_queue q, cl_program prog, const Args& args,
+                            const char* kernel_name, int pixels_per_wi, const char* label,
+                            const std::vector<unsigned char>& r,
+                            const std::vector<unsigned char>& g,
+                            const std::vector<unsigned char>& b, const std::vector<float>& ref) {
     const int w = args.width;
     const int h = args.height;
     const size_t n = static_cast<size_t>(w) * h;
     const size_t out_n = n * 3;
     const int src_stride = w;
     const int dst_stride = w * 3;
-
-    std::vector<float> packed(n * 3);
-    std::memcpy(packed.data(), r.data(), n * sizeof(float));
-    std::memcpy(packed.data() + n, g.data(), n * sizeof(float));
-    std::memcpy(packed.data() + 2 * n, b.data(), n * sizeof(float));
-
-    cl_int err = 0;
-    cl_mem buf_in = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                   packed.size() * sizeof(float), packed.data(), &err);
-    OCL_CHECK(err, "buf_in");
-    cl_mem buf_out = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, out_n * sizeof(float), nullptr, &err);
-    OCL_CHECK(err, "buf_out");
-
-    cl_kernel kn = clCreateKernel(prog, "planar_rgb_packed_to_cv32fc3", &err);
-    OCL_CHECK(err, "kernel packed");
-    OCL_CHECK(clSetKernelArg(kn, 0, sizeof(cl_mem), &buf_in), "arg0");
-    OCL_CHECK(clSetKernelArg(kn, 1, sizeof(cl_mem), &buf_out), "arg1");
-    OCL_CHECK(clSetKernelArg(kn, 2, sizeof(int), &w), "arg2");
-    OCL_CHECK(clSetKernelArg(kn, 3, sizeof(int), &h), "arg3");
-    OCL_CHECK(clSetKernelArg(kn, 4, sizeof(int), &src_stride), "arg4");
-    OCL_CHECK(clSetKernelArg(kn, 5, sizeof(int), &dst_stride), "arg5");
-
-    size_t global[2] = {static_cast<size_t>(w), static_cast<size_t>(h)};
-    for (int i = 0; i < args.warmup; ++i) {
-        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, nullptr),
-                  "warmup");
-    }
-    OCL_CHECK(clFinish(q), "finish warmup");
-
-    double sum_ms = 0.0;
-    for (int i = 0; i < args.runs; ++i) {
-        cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, &ev),
-                  "enqueue");
-        sum_ms += profileMs(ev);
-        clReleaseEvent(ev);
-    }
-
-    std::vector<float> out(out_n);
-    OCL_CHECK(clEnqueueReadBuffer(q, buf_out, CL_TRUE, 0, out_n * sizeof(float), out.data(), 0,
-                                  nullptr, nullptr),
-              "read");
-    const float diff = maxAbsDiff(out.data(), ref.data(), out_n);
-
-    clReleaseKernel(kn);
-    clReleaseMemObject(buf_in);
-    clReleaseMemObject(buf_out);
-
-    CaseResult res{};
-    res.name = "float packed [R|G|B]";
-    res.max_diff = diff;
-    res.gpu_ms = sum_ms / args.runs;
-    res.cpu_ms = 0.0;
-    res.ok = diff <= 1e-5f;
-    return res;
-}
-
-CaseResult runUcharSeparate(cl_context ctx, cl_command_queue q, cl_program prog, const Args& args) {
-    const int w = args.width;
-    const int h = args.height;
-    const size_t n = static_cast<size_t>(w) * h;
-    const size_t out_n = n * 3;
-    const int src_stride = w;
-    const int dst_stride = w * 3;
-
-    std::vector<unsigned char> r, g, b;
-    fillUcharPlanes(r, g, b, w, h);
-    std::vector<float> ref(out_n);
-    cpuRefBgrUchar(r.data(), g.data(), b.data(), ref.data(), w, h);
 
     cl_int err = 0;
     cl_mem buf_r =
-        clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n, r.data(), &err);
+        clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n, const_cast<unsigned char*>(r.data()),
+                       &err);
     OCL_CHECK(err, "buf_r u8");
     cl_mem buf_g =
-        clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n, g.data(), &err);
+        clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n, const_cast<unsigned char*>(g.data()),
+                       &err);
     OCL_CHECK(err, "buf_g u8");
     cl_mem buf_b =
-        clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n, b.data(), &err);
+        clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n, const_cast<unsigned char*>(b.data()),
+                       &err);
     OCL_CHECK(err, "buf_b u8");
     cl_mem buf_out = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, out_n * sizeof(float), nullptr, &err);
     OCL_CHECK(err, "buf_out u8");
 
-    cl_kernel kn = clCreateKernel(prog, "planar_rgb_to_cv32fc3", &err);
-    OCL_CHECK(err, "kernel u8");
+    cl_kernel kn = clCreateKernel(prog, kernel_name, &err);
+    OCL_CHECK(err, kernel_name);
     OCL_CHECK(clSetKernelArg(kn, 0, sizeof(cl_mem), &buf_r), "arg0");
     OCL_CHECK(clSetKernelArg(kn, 1, sizeof(cl_mem), &buf_g), "arg1");
     OCL_CHECK(clSetKernelArg(kn, 2, sizeof(cl_mem), &buf_b), "arg2");
@@ -383,21 +323,9 @@ CaseResult runUcharSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
     OCL_CHECK(clSetKernelArg(kn, 6, sizeof(int), &src_stride), "arg6");
     OCL_CHECK(clSetKernelArg(kn, 7, sizeof(int), &dst_stride), "arg7");
 
-    size_t global[2] = {static_cast<size_t>(w), static_cast<size_t>(h)};
-    for (int i = 0; i < args.warmup; ++i) {
-        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, nullptr),
-                  "warmup");
-    }
-    OCL_CHECK(clFinish(q), "finish warmup");
-
-    double sum_ms = 0.0;
-    for (int i = 0; i < args.runs; ++i) {
-        cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(q, kn, 2, nullptr, global, nullptr, 0, nullptr, &ev),
-                  "enqueue");
-        sum_ms += profileMs(ev);
-        clReleaseEvent(ev);
-    }
+    const size_t gx = (static_cast<size_t>(w) + pixels_per_wi - 1) / pixels_per_wi;
+    size_t global[2] = {gx, static_cast<size_t>(h)};
+    const double gpu_ms = runKernelTimed(q, kn, global, args.warmup, args.runs);
 
     std::vector<float> out(out_n);
     OCL_CHECK(clEnqueueReadBuffer(q, buf_out, CL_TRUE, 0, out_n * sizeof(float), out.data(), 0,
@@ -411,11 +339,10 @@ CaseResult runUcharSeparate(cl_context ctx, cl_command_queue q, cl_program prog,
     clReleaseMemObject(buf_b);
     clReleaseMemObject(buf_out);
 
-    CaseResult res{};
-    res.name = "uchar separate (/255)";
+    CaseResult res;
+    res.name = label;
     res.max_diff = diff;
-    res.gpu_ms = sum_ms / args.runs;
-    res.cpu_ms = 0.0;
+    res.gpu_ms = gpu_ms;
     res.ok = diff <= 1e-5f;
     return res;
 }
@@ -454,12 +381,14 @@ int main(int argc, char** argv) {
 
     cl_context ctx = clCreateContext(nullptr, 1, &dev, nullptr, nullptr, &err);
     OCL_CHECK(err, "context");
-    cl_command_queue q =
-        clCreateCommandQueue(ctx, dev, CL_QUEUE_PROFILING_ENABLE, &err);
+    cl_command_queue q = clCreateCommandQueue(ctx, dev, CL_QUEUE_PROFILING_ENABLE, &err);
     OCL_CHECK(err, "queue");
 
-    cl_program prog_f = buildProgram(ctx, dev, src, nullptr);
-    cl_program prog_u8 = buildProgram(ctx, dev, src, "-DINPUT_UCHAR");
+    cl_program prog_f1 = buildProgram(ctx, dev, src, nullptr);  // PIXELS_PER_WI=8 default for ppx
+    cl_program prog_f4 = buildProgram(ctx, dev, src, "-DPIXELS_PER_WI=4");
+    cl_program prog_f16 = buildProgram(ctx, dev, src, "-DPIXELS_PER_WI=16");
+    cl_program prog_u8_1 = buildProgram(ctx, dev, src, "-DINPUT_UCHAR");
+    cl_program prog_u8_8 = buildProgram(ctx, dev, src, "-DINPUT_UCHAR -DPIXELS_PER_WI=8");
 
     std::vector<float> r, g, b;
     fillPlanes(r, g, b, args.width, args.height);
@@ -473,31 +402,66 @@ int main(int argc, char** argv) {
 
     std::vector<unsigned char> ur, ug, ub;
     fillUcharPlanes(ur, ug, ub, args.width, args.height);
+    std::vector<float> uref(ref.size());
+    cpuRefBgrUchar(ur.data(), ug.data(), ub.data(), uref.data(), args.width, args.height);
     const double cpu_uchar_ms = benchCpuMs(args.warmup, args.runs, [&] {
         cpuRefBgrUchar(ur.data(), ug.data(), ub.data(), cpu_dst.data(), args.width, args.height);
     });
 
-    CaseResult c0 = runFloatSeparate(ctx, q, prog_f, args, r, g, b, ref);
-    CaseResult c1 = runFloatPacked(ctx, q, prog_f, args, r, g, b, ref);
-    CaseResult c2 = runUcharSeparate(ctx, q, prog_u8, args);
-    c0.cpu_ms = cpu_float_ms;
-    c1.cpu_ms = cpu_float_ms;
-    c2.cpu_ms = cpu_uchar_ms;
+    std::vector<CaseResult> cases;
+    cases.push_back(runFloatSeparate(ctx, q, prog_f1, args, "planar_rgb_to_cv32fc3", 1,
+                                     "float 1px/WI (baseline)", r, g, b, ref));
+    cases.push_back(runFloatSeparate(ctx, q, prog_f4, args, "planar_rgb_to_cv32fc3_ppx", 4,
+                                     "float 4px/WI + vload4", r, g, b, ref));
+    cases.push_back(runFloatSeparate(ctx, q, prog_f1, args, "planar_rgb_to_cv32fc3_ppx", 8,
+                                     "float 8px/WI + vload4", r, g, b, ref));
+    cases.push_back(runFloatSeparate(ctx, q, prog_f16, args, "planar_rgb_to_cv32fc3_ppx", 16,
+                                     "float 16px/WI + vload4", r, g, b, ref));
+    cases.push_back(runUcharSeparate(ctx, q, prog_u8_1, args, "planar_rgb_to_cv32fc3", 1,
+                                     "uchar 1px/WI (baseline)", ur, ug, ub, uref));
+    cases.push_back(runUcharSeparate(ctx, q, prog_u8_8, args, "planar_rgb_to_cv32fc3_ppx", 8,
+                                     "uchar 8px/WI + vload4", ur, ug, ub, uref));
 
-    std::printf("=== results (CPU convert vs GPU kernel, OpenCV BGR float) ===\n");
-    std::printf("  (cpu = host planar->CV_32FC3 convert; gpu = OpenCL kernel only, no H2D/D2H)\n");
+    for (auto& c : cases) {
+        c.cpu_ms = (c.name.find("uchar") != std::string::npos) ? cpu_uchar_ms : cpu_float_ms;
+    }
+
+    std::printf("=== results (CPU convert vs GPU kernel) ===\n");
+    std::printf("  (cpu = host convert; gpu = OpenCL kernel only, no H2D/D2H)\n");
+    std::printf("  ppx = more pixels per work-item (fewer WI, vector loads)\n\n");
     bool all_ok = true;
-    for (const CaseResult& c : {c0, c1, c2}) {
-        const double speedup = c.gpu_ms > 0.0 ? (c.cpu_ms / c.gpu_ms) : 0.0;
-        std::printf("  %-28s  max_diff=%.3e  cpu=%.3f ms  gpu=%.3f ms  (%.2fx)  %s\n", c.name,
-                    c.max_diff, c.cpu_ms, c.gpu_ms, speedup, c.ok ? "OK" : "FAIL");
+    double baseline_gpu = 0.0;
+    for (size_t i = 0; i < cases.size(); ++i) {
+        const CaseResult& c = cases[i];
+        if (i == 0) {
+            baseline_gpu = c.gpu_ms;
+        }
+        const double vs_cpu = c.gpu_ms > 0.0 ? (c.cpu_ms / c.gpu_ms) : 0.0;
+        const double vs_base = (baseline_gpu > 0.0 && i > 0 && c.name.find("float") == 0)
+                                   ? (baseline_gpu / c.gpu_ms)
+                                   : 0.0;
+        if (vs_base > 0.0) {
+            std::printf(
+                "  %-28s  max_diff=%.3e  cpu=%.3f ms  gpu=%.3f ms  (%.2fx vs cpu, %.2fx vs 1px)  "
+                "%s\n",
+                c.name.c_str(), c.max_diff, c.cpu_ms, c.gpu_ms, vs_cpu, vs_base,
+                c.ok ? "OK" : "FAIL");
+        } else {
+            std::printf("  %-28s  max_diff=%.3e  cpu=%.3f ms  gpu=%.3f ms  (%.2fx vs cpu)  %s\n",
+                        c.name.c_str(), c.max_diff, c.cpu_ms, c.gpu_ms, vs_cpu,
+                        c.ok ? "OK" : "FAIL");
+        }
         all_ok = all_ok && c.ok;
     }
     std::printf("\n%d x %d x 3 floats = %.1f MB output\n", args.width, args.height,
                 args.width * args.height * 3 * 4 / (1024.0 * 1024.0));
+    std::printf("Prefer *_ppx with -DPIXELS_PER_WI=8 (or tune 4/16 from this table).\n");
 
-    clReleaseProgram(prog_f);
-    clReleaseProgram(prog_u8);
+    clReleaseProgram(prog_f1);
+    clReleaseProgram(prog_f4);
+    clReleaseProgram(prog_f16);
+    clReleaseProgram(prog_u8_1);
+    clReleaseProgram(prog_u8_8);
     clReleaseCommandQueue(q);
     clReleaseContext(ctx);
     return all_ok ? 0 : 1;

@@ -42,8 +42,11 @@ Device: ...
 
 | Kernel | Use when |
 |--------|----------|
-| `planar_rgb_to_cv32fc3` | Separate `r`, `g`, `b` buffers |
-| `planar_rgb_packed_to_cv32fc3` | One buffer: `[R\|G\|B]` |
+| `planar_rgb_to_cv32fc3` | Separate planes, **1 pixel / work-item** (baseline) |
+| `planar_rgb_to_cv32fc3_ppx` | Separate planes, **N pixels / WI** + `vload4` (faster) |
+| `planar_rgb_packed_to_cv32fc3` / `_ppx` | One buffer: `[R\|G\|B]` |
+
+NDRange for `*_ppx`: `global = (ceil(width / PIXELS_PER_WI), height)`.
 
 ## Compile flags
 
@@ -52,3 +55,6 @@ Device: ...
 | *(none)* | `float` planes → float BGR |
 | `-DINPUT_UCHAR` | `uchar` planes, scale `/255` |
 | `-DOUT_RGB` | write RGB instead of OpenCV BGR |
+| `-DPIXELS_PER_WI=8` | pixels per work-item for `*_ppx` (try 4 / 8 / 16) |
+
+Device test compares **1px vs 4/8/16 px/WI** so you can pick the best on your GPU.
