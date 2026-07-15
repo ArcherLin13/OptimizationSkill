@@ -9,6 +9,19 @@ Converts **planar** RGB (full R plane, then G, then B) into OpenCV **interleaved
 | **Input** | `R[0..N)`, `G[0..N)`, `B[0..N)` contiguous planes (`N = height * stride`) |
 | **Output** | OpenCV `CV_32FC3`: per pixel `[B, G, R]` float |
 
+## NEON (CPU, recommended for host Mat)
+
+```cpp
+#include "device_test/neon_planar_to_cv32fc3.h"
+
+// float planes -> CV_32FC3 BGR (uses vst3q_f32)
+neon_planar_rgb_f32_to_cv32fc3(r, g, b, (float*)mat.data, w, h, w, w * 3);
+// uchar planes -> float BGR (/255)
+neon_planar_rgb_u8_to_cv32fc3(r8, g8, b8, (float*)mat.data, w, h, w, w * 3);
+// multi-thread (row parallel)
+neon_planar_rgb_f32_to_cv32fc3_mt(r, g, b, dst, w, h, w, w * 3, /*threads*/0);
+```
+
 ## HarmonyOS device test
 
 ```powershell

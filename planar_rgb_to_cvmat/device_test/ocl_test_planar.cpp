@@ -8,6 +8,7 @@
 #ifdef OCR_OPENCL_DLOPEN
 #include "opencl_dynload.h"
 #endif
+#include "neon_planar_to_cv32fc3.h"
 
 #include <algorithm>
 #include <chrono>
@@ -537,6 +538,24 @@ int main(int argc, char** argv) {
                     cpu_threads);
     });
 
+    const int src_stride = args.width;
+    const int dst_stride = args.width * 3;
+    std::vector<float> neon_dst(ref.size(), 0.f);
+    neon_planar_rgb_f32_to_cv32fc3(r.data(), g.data(), b.data(), neon_dst.data(), args.width,
+                                   args.height, src_stride, dst_stride);
+    const float neon_diff = maxAbsDiff(neon_dst.data(), ref.data(), ref.size());
+    const bool neon_ok = neon_diff <= 1e-5f;
+
+    const double neon_1t_ms = benchCpuMs(args.warmup, args.runs, [&] {
+        neon_planar_rgb_f32_to_cv32fc3(r.data(), g.data(), b.data(), neon_dst.data(), args.width,
+                                       args.height, src_stride, dst_stride);
+    });
+    const double neon_mt_ms = benchCpuMs(args.warmup, args.runs, [&] {
+        neon_planar_rgb_f32_to_cv32fc3_mt(r.data(), g.data(), b.data(), neon_dst.data(),
+                                          args.width, args.height, src_stride, dst_stride,
+                                          cpu_threads);
+    });
+
     // Traffic: 3 planar float reads + 3-channel float write = 24 bytes / pixel
     const double bytes =
         static_cast<double>(args.width) * args.height * 3.0 * sizeof(float) * 2.0;
@@ -545,43 +564,41 @@ int main(int argc, char** argv) {
                                      "float 1px/WI", r, g, b, ref);
     CaseResult c8 = runFloatSeparate(ctx, q, prog_f, args, "planar_rgb_to_cv32fc3_ppx", 8,
                                      "float 8px/WI", r, g, b, ref);
-    c1.cpu_ms = cpu_1t_ms;
-    c8.cpu_ms = cpu_1t_ms;
 
     double e2e_kernel = 0.0;
     double e2e_wall = 0.0;
     benchFloatE2E(ctx, q, prog_f, args, r, g, b, &e2e_kernel, &e2e_wall);
 
-    std::printf("=== why ~1.5x is common ===\n");
-    std::printf("  This kernel is memory-bound (rearrange), not compute-bound.\n");
-    std::printf("  Phone CPU+GPU share the same DRAM; CPU streams this pattern well.\n");
-    std::printf("  Interleaved BGR writes are poorly coalesced on GPU.\n");
-    std::printf("  Real win is keeping buffers on GPU (skip H2D/D2H), not beating CPU alone.\n\n");
+    std::printf("NEON: %s\n\n", neon_planar_available() ? "enabled (AArch64 intrinsics)"
+                                                         : "fallback scalar");
 
-    std::printf("=== CPU ===\n");
-    std::printf("  1-thread:  %.3f ms  (%.1f GB/s)\n", cpu_1t_ms, gbps(bytes, cpu_1t_ms));
-    std::printf("  %d-thread: %.3f ms  (%.1f GB/s)\n\n", cpu_threads, cpu_mt_ms,
+    std::printf("=== CPU / NEON ===\n");
+    std::printf("  scalar 1t:  %.3f ms  (%.1f GB/s)\n", cpu_1t_ms, gbps(bytes, cpu_1t_ms));
+    std::printf("  scalar %dt: %.3f ms  (%.1f GB/s)\n", cpu_threads, cpu_mt_ms,
                 gbps(bytes, cpu_mt_ms));
+    std::printf("  NEON 1t:    %.3f ms  (%.1f GB/s)  max_diff=%.3e  %s\n", neon_1t_ms,
+                gbps(bytes, neon_1t_ms), neon_diff, neon_ok ? "OK" : "FAIL");
+    std::printf("  NEON %dt:   %.3f ms  (%.1f GB/s)\n\n", cpu_threads, neon_mt_ms,
+                gbps(bytes, neon_mt_ms));
 
     std::printf("=== GPU kernel only (data already on device) ===\n");
-    bool all_ok = true;
+    bool all_ok = neon_ok;
     for (const CaseResult& c : {c1, c8}) {
-        std::printf("  %-16s  max_diff=%.3e  gpu=%.3f ms  (%.1f GB/s)  vs1t=%.2fx  vsMTc=%.2fx  %s\n",
-                    c.name.c_str(), c.max_diff, c.gpu_ms, gbps(bytes, c.gpu_ms),
-                    cpu_1t_ms / c.gpu_ms, cpu_mt_ms / c.gpu_ms, c.ok ? "OK" : "FAIL");
+        std::printf(
+            "  %-16s  max_diff=%.3e  gpu=%.3f ms  (%.1f GB/s)  vsNEON1t=%.2fx  vsNEONMT=%.2fx  %s\n",
+            c.name.c_str(), c.max_diff, c.gpu_ms, gbps(bytes, c.gpu_ms), neon_1t_ms / c.gpu_ms,
+            neon_mt_ms / c.gpu_ms, c.ok ? "OK" : "FAIL");
         all_ok = all_ok && c.ok;
     }
 
     std::printf("\n=== GPU end-to-end (H2D + kernel + D2H)  float 8px/WI ===\n");
     std::printf("  kernel: %.3f ms   e2e wall: %.3f ms\n", e2e_kernel, e2e_wall);
-    std::printf("  vs CPU 1t: kernel %.2fx, e2e %.2fx\n", cpu_1t_ms / e2e_kernel,
-                cpu_1t_ms / e2e_wall);
-    std::printf("  vs CPU MT: kernel %.2fx, e2e %.2fx\n", cpu_mt_ms / e2e_kernel,
-                cpu_mt_ms / e2e_wall);
-    if (e2e_wall > cpu_mt_ms) {
-        std::printf(
-            "  => For CPU-resident Mat, prefer CPU (or NEON). Use GPU when source is already "
-            "on GPU.\n");
+    std::printf("  vs NEON 1t: kernel %.2fx, e2e %.2fx\n", neon_1t_ms / e2e_kernel,
+                neon_1t_ms / e2e_wall);
+    std::printf("  vs NEON MT: kernel %.2fx, e2e %.2fx\n", neon_mt_ms / e2e_kernel,
+                neon_mt_ms / e2e_wall);
+    if (e2e_wall > neon_mt_ms) {
+        std::printf("  => For host Mat, prefer NEON. Use GPU when data already on GPU.\n");
     }
 
     std::printf("\n%d x %d  traffic ~= %.1f MB (read+write)\n", args.width, args.height,

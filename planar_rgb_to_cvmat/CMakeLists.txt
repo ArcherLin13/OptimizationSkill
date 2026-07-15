@@ -8,6 +8,7 @@ set(OPENCL_HEADERS_DIR "${ROOT}/../ocr_softmax_bench/third_party/OpenCL-Headers"
 if(EXISTS "${OPENCL_HEADERS_DIR}/CL/cl.h")
     add_executable(ocl_test_planar
         device_test/ocl_test_planar.cpp
+        device_test/neon_planar_to_cv32fc3.cpp
     )
     target_compile_features(ocl_test_planar PRIVATE cxx_std_17)
     target_include_directories(ocl_test_planar PRIVATE "${OPENCL_HEADERS_DIR}" "${ROOT}/device_test")
