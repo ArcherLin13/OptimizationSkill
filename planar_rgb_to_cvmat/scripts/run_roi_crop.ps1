@@ -18,7 +18,7 @@ if ([string]::IsNullOrWhiteSpace($OhosNative)) {
 }
 $Hdc = Join-Path (Split-Path $OhosNative -Parent) "toolchains\hdc.exe"
 
-if (-not (Test-Path $Exe)) {
+if (-not (Test-Path -LiteralPath $Exe)) {
     Write-Host "Missing: $Exe"
     Write-Host "Build: .\scripts\build_ohos.ps1"
     exit 1

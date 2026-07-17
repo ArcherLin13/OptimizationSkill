@@ -1,5 +1,5 @@
-// HarmonyOS: compare full-frame trans2cv vs 16x ROI crop+trans.
-// Scenario default: 4096x3072, 16 boxes ~1000x150.
+// CPU 1-thread only: full-image trans2cv vs N box ROI trans2cv.
+// Default: 4096x3072, 16 boxes of 1000x150.
 //
 // Usage:
 //   ./test_roi_crop [--width 4096] [--height 3072] [--boxes 16] [--box-w 1000] [--box-h 150]
@@ -12,7 +12,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 #include <vector>
 
 namespace {
@@ -50,9 +49,8 @@ Args parseArgs(int argc, char** argv) {
             a.warmup = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
             std::printf(
-                "Usage: %s [--width W] [--height H] [--boxes N] [--box-w BW] [--box-h BH] "
-                "[--runs R]\n"
-                "  Default: 4096x3072, 16 boxes of 1000x150\n",
+                "Usage: %s [--width W] [--height H] [--boxes N] [--box-w BW] [--box-h BH]\n"
+                "  CPU 1-thread: full trans2cv vs N ROI trans2cv\n",
                 argv[0]);
             std::exit(0);
         }
@@ -100,28 +98,16 @@ std::vector<Rect> makeBoxes(const Args& a) {
     return out;
 }
 
-void cropRoiToBgr(const float* r, const float* g, const float* b, int src_stride, const Rect& roi,
-                  float* dst_bgr) {
-    const float* r0 = r + roi.y * src_stride + roi.x;
-    const float* g0 = g + roi.y * src_stride + roi.x;
-    const float* b0 = b + roi.y * src_stride + roi.x;
-    neon_planar_rgb_f32_to_cv32fc3(r0, g0, b0, dst_bgr, roi.w, roi.h, src_stride, roi.w * 3);
+// Same work as planar::cropAabbFromBuffers / rgb_mat(roi) for one box.
+void transRoi(const float* r, const float* g, const float* b, int stride, const Rect& roi,
+              float* dst_bgr) {
+    neon_planar_rgb_f32_to_cv32fc3(r + roi.y * stride + roi.x, g + roi.y * stride + roi.x,
+                                   b + roi.y * stride + roi.x, dst_bgr, roi.w, roi.h, stride,
+                                   roi.w * 3);
 }
 
-void fullThenCropRef(const float* full_bgr, int full_w, const Rect& roi, float* dst_bgr) {
-    for (int y = 0; y < roi.h; ++y) {
-        const float* src = full_bgr + ((roi.y + y) * full_w + roi.x) * 3;
-        float* dst = dst_bgr + y * roi.w * 3;
-        std::memcpy(dst, src, static_cast<size_t>(roi.w) * 3 * sizeof(float));
-    }
-}
-
-float maxAbsDiff(const float* a, const float* b, size_t n) {
-    float m = 0.f;
-    for (size_t i = 0; i < n; ++i) {
-        m = std::max(m, std::fabs(a[i] - b[i]));
-    }
-    return m;
+void transFull(const float* r, const float* g, const float* b, int w, int h, float* dst_bgr) {
+    neon_planar_rgb_f32_to_cv32fc3(r, g, b, dst_bgr, w, h, w, w * 3);
 }
 
 template <typename Fn>
@@ -144,14 +130,13 @@ int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
     const int W = args.width;
     const int H = args.height;
-    const int stride = W;
 
-    std::printf("=== ROI vs full trans2cv (CPU/NEON) ===\n");
-    std::printf("NEON: %s\n", neon_planar_available() ? "yes" : "scalar fallback");
-    std::printf("full image: %d x %d  (%.2f MP)\n", W, H, W * H / 1e6);
-    std::printf("boxes: %d x (%d x %d) = %.2f MP total\n", args.boxes, args.box_w, args.box_h,
-                args.boxes * args.box_w * args.box_h / 1e6);
-    std::printf("pixel ratio (boxes/full): %.1f%%\n\n",
+    std::printf("=== CPU 1-thread: full trans vs box ROI trans ===\n");
+    std::printf("impl: %s (1 thread only, convert duration only)\n",
+                neon_planar_available() ? "NEON" : "scalar");
+    std::printf("full:  %d x %d = %.2f MP\n", W, H, W * H / 1e6);
+    std::printf("boxes: %d x (%d x %d) = %.2f MP (%.1f%% of full)\n\n", args.boxes, args.box_w,
+                args.box_h, args.boxes * args.box_w * args.box_h / 1e6,
                 100.0 * args.boxes * args.box_w * args.box_h / (static_cast<double>(W) * H));
 
     std::vector<float> r, g, b;
@@ -159,52 +144,50 @@ int main(int argc, char** argv) {
     const std::vector<Rect> boxes = makeBoxes(args);
 
     std::vector<float> full_bgr(static_cast<size_t>(W) * H * 3);
-    neon_planar_rgb_f32_to_cv32fc3(r.data(), g.data(), b.data(), full_bgr.data(), W, H, stride,
-                                   W * 3);
-
-    // Correctness on first few boxes
-    bool all_ok = true;
-    std::printf("--- correctness (ROI crop == full-trans then crop) ---\n");
-    const int check_n = std::min(4, static_cast<int>(boxes.size()));
-    for (int i = 0; i < check_n; ++i) {
-        const Rect& roi = boxes[i];
-        std::vector<float> crop(static_cast<size_t>(roi.w) * roi.h * 3);
-        std::vector<float> ref(crop.size());
-        cropRoiToBgr(r.data(), g.data(), b.data(), stride, roi, crop.data());
-        fullThenCropRef(full_bgr.data(), W, roi, ref.data());
-        const float diff = maxAbsDiff(crop.data(), ref.data(), crop.size());
-        const bool ok = diff <= 1e-5f;
-        all_ok = all_ok && ok;
-        std::printf("  box[%d] (%d,%d,%d,%d) max_diff=%.3e %s\n", i, roi.x, roi.y, roi.w, roi.h,
-                    diff, ok ? "OK" : "FAIL");
-    }
-
-    // Preallocate crop buffers for timing (exclude alloc)
     std::vector<std::vector<float>> crops(boxes.size());
     for (size_t i = 0; i < boxes.size(); ++i) {
         crops[i].resize(static_cast<size_t>(boxes[i].w) * boxes[i].h * 3);
     }
 
+    // Correctness: first box ROI == crop from full interleaved
+    transFull(r.data(), g.data(), b.data(), W, H, full_bgr.data());
+    {
+        const Rect& roi = boxes[0];
+        transRoi(r.data(), g.data(), b.data(), W, roi, crops[0].data());
+        float max_diff = 0.f;
+        for (int y = 0; y < roi.h; ++y) {
+            const float* ref_row = full_bgr.data() + ((roi.y + y) * W + roi.x) * 3;
+            const float* crop_row = crops[0].data() + y * roi.w * 3;
+            for (int i = 0; i < roi.w * 3; ++i) {
+                max_diff = std::max(max_diff, std::fabs(crop_row[i] - ref_row[i]));
+            }
+        }
+        std::printf("correctness box0 vs full-crop: max_diff=%.3e %s\n\n", max_diff,
+                    max_diff <= 1e-5f ? "OK" : "FAIL");
+        if (max_diff > 1e-5f) {
+            return 1;
+        }
+    }
+
     const double full_ms = benchMs(args.warmup, args.runs, [&] {
-        neon_planar_rgb_f32_to_cv32fc3(r.data(), g.data(), b.data(), full_bgr.data(), W, H, stride,
-                                       W * 3);
+        transFull(r.data(), g.data(), b.data(), W, H, full_bgr.data());
     });
 
-    const double rois_ms = benchMs(args.warmup, args.runs, [&] {
+    const double boxes_ms = benchMs(args.warmup, args.runs, [&] {
         for (size_t i = 0; i < boxes.size(); ++i) {
-            cropRoiToBgr(r.data(), g.data(), b.data(), stride, boxes[i], crops[i].data());
+            transRoi(r.data(), g.data(), b.data(), W, boxes[i], crops[i].data());
         }
     });
 
-    std::printf("\n--- convert duration only (avg over %d runs) ---\n", args.runs);
-    std::printf("  full trans once:           %.3f ms\n", full_ms);
-    std::printf("  %d ROI trans (sum):         %.3f ms\n", args.boxes, rois_ms);
-    std::printf("  speedup (full / rois):     %.2fx\n", full_ms / std::max(rois_ms, 1e-9));
-    std::printf("  per-box avg:               %.3f ms\n", rois_ms / args.boxes);
-
-    std::printf("\nApp usage:\n");
-    std::printf("  #include \"planar_roi_crop.h\"\n");
-    std::printf("  cv::Mat crop = planar::cropAabbFromBuffers(r,g,b,W,H,W, roi);\n");
-
-    return all_ok ? 0 : 1;
+    std::printf("--- CPU 1-thread convert time (avg %d runs) ---\n", args.runs);
+    std::printf("  full image trans once:     %.3f ms\n", full_ms);
+    std::printf("  %d box ROI trans (sum):     %.3f ms\n", args.boxes, boxes_ms);
+    std::printf("  per box avg:               %.3f ms\n", boxes_ms / args.boxes);
+    std::printf("  full / boxes:              %.2fx\n", full_ms / std::max(boxes_ms, 1e-9));
+    if (boxes_ms < full_ms) {
+        std::printf("  => ROI path faster for this workload\n");
+    } else {
+        std::printf("  => full path not slower (unexpected for small boxes)\n");
+    }
+    return 0;
 }
