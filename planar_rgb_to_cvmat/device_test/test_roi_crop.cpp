@@ -1,4 +1,5 @@
-// CPU 1-thread only: full-image trans2cv vs N box ROI trans2cv.
+// CPU: full-image trans2cv vs N box ROI trans2cv.
+// Also sweeps box-parallel thread counts vs when_all (1 thread per box).
 // Default: 4096x3072, 16 boxes of 1000x150.
 //
 // Usage:
@@ -7,11 +8,15 @@
 #include "neon_planar_to_cv32fc3.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -50,7 +55,7 @@ Args parseArgs(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
             std::printf(
                 "Usage: %s [--width W] [--height H] [--boxes N] [--box-w BW] [--box-h BH]\n"
-                "  CPU 1-thread: full trans2cv vs N ROI trans2cv\n",
+                "  full vs ROI (1t), then ROI thread sweep + when_all\n",
                 argv[0]);
             std::exit(0);
         }
@@ -98,7 +103,6 @@ std::vector<Rect> makeBoxes(const Args& a) {
     return out;
 }
 
-// Same work as planar::cropAabbFromBuffers / rgb_mat(roi) for one box.
 void transRoi(const float* r, const float* g, const float* b, int stride, const Rect& roi,
               float* dst_bgr) {
     neon_planar_rgb_f32_to_cv32fc3(r + roi.y * stride + roi.x, g + roi.y * stride + roi.x,
@@ -124,16 +128,136 @@ double benchMs(int warmup, int runs, Fn&& fn) {
     return sum / runs;
 }
 
+// Persistent pool: T workers pull box indices (atomic). Spawn cost outside timed region.
+class BoxWorkerPool {
+public:
+    BoxWorkerPool(int threads, const float* r, const float* g, const float* b, int stride,
+                  const std::vector<Rect>* boxes, std::vector<std::vector<float>>* crops)
+        : threads_(std::max(1, threads)),
+          r_(r),
+          g_(g),
+          b_(b),
+          stride_(stride),
+          boxes_(boxes),
+          crops_(crops) {
+        workers_.reserve(static_cast<size_t>(threads_));
+        for (int t = 0; t < threads_; ++t) {
+            workers_.emplace_back([this] { workerLoop(); });
+        }
+    }
+
+    ~BoxWorkerPool() {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            stop_ = true;
+            ++epoch_;
+        }
+        cv_.notify_all();
+        for (auto& th : workers_) {
+            th.join();
+        }
+    }
+
+    void runAll() {
+        const int n = static_cast<int>(boxes_->size());
+        next_.store(0, std::memory_order_relaxed);
+        done_.store(0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            ++epoch_;
+            active_ = true;
+        }
+        cv_.notify_all();
+
+        std::unique_lock<std::mutex> lock(mu_);
+        done_cv_.wait(lock, [&] { return done_.load(std::memory_order_acquire) >= n; });
+        active_ = false;
+    }
+
+private:
+    void workerLoop() {
+        int seen = 0;
+        for (;;) {
+            std::unique_lock<std::mutex> lock(mu_);
+            cv_.wait(lock, [&] { return stop_ || (active_ && epoch_ != seen); });
+            if (stop_) {
+                return;
+            }
+            seen = epoch_;
+            lock.unlock();
+
+            const int n = static_cast<int>(boxes_->size());
+            for (;;) {
+                const int i = next_.fetch_add(1, std::memory_order_relaxed);
+                if (i >= n) {
+                    break;
+                }
+                transRoi(r_, g_, b_, stride_, (*boxes_)[static_cast<size_t>(i)],
+                         (*crops_)[static_cast<size_t>(i)].data());
+                if (done_.fetch_add(1, std::memory_order_acq_rel) + 1 >= n) {
+                    done_cv_.notify_one();
+                }
+            }
+        }
+    }
+
+    int threads_ = 1;
+    const float* r_ = nullptr;
+    const float* g_ = nullptr;
+    const float* b_ = nullptr;
+    int stride_ = 0;
+    const std::vector<Rect>* boxes_ = nullptr;
+    std::vector<std::vector<float>>* crops_ = nullptr;
+
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::condition_variable done_cv_;
+    bool stop_ = false;
+    bool active_ = false;
+    int epoch_ = 0;
+    std::atomic<int> next_{0};
+    std::atomic<int> done_{0};
+    std::vector<std::thread> workers_;
+};
+
+// when_all: one std::thread per box, join all (includes spawn/join cost).
+void runWhenAll(const float* r, const float* g, const float* b, int stride,
+                const std::vector<Rect>& boxes, std::vector<std::vector<float>>& crops) {
+    std::vector<std::thread> workers;
+    workers.reserve(boxes.size());
+    for (size_t i = 0; i < boxes.size(); ++i) {
+        workers.emplace_back([&, i] {
+            transRoi(r, g, b, stride, boxes[i], crops[i].data());
+        });
+    }
+    for (auto& th : workers) {
+        th.join();
+    }
+}
+
+std::vector<int> threadSweep(int max_t) {
+    std::vector<int> out;
+    for (int t = 1; t <= max_t; ++t) {
+        if (t == 1 || t == 2 || t == 4 || t == 6 || t == 8 || t == max_t || (t % 4 == 0 && t <= 16)) {
+            if (out.empty() || out.back() != t) {
+                out.push_back(t);
+            }
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
     const int W = args.width;
     const int H = args.height;
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
 
-    std::printf("=== CPU 1-thread: full trans vs box ROI trans ===\n");
-    std::printf("impl: %s (1 thread only, convert duration only)\n",
-                neon_planar_available() ? "NEON" : "scalar");
+    std::printf("=== CPU: full trans vs box ROI (+ MT sweep) ===\n");
+    std::printf("impl: %s | hardware_concurrency=%u\n",
+                neon_planar_available() ? "NEON" : "scalar", hw);
     std::printf("full:  %d x %d = %.2f MP\n", W, H, W * H / 1e6);
     std::printf("boxes: %d x (%d x %d) = %.2f MP (%.1f%% of full)\n\n", args.boxes, args.box_w,
                 args.box_h, args.boxes * args.box_w * args.box_h / 1e6,
@@ -173,7 +297,7 @@ int main(int argc, char** argv) {
         transFull(r.data(), g.data(), b.data(), W, H, full_bgr.data());
     });
 
-    const double boxes_ms = benchMs(args.warmup, args.runs, [&] {
+    const double boxes_1t_ms = benchMs(args.warmup, args.runs, [&] {
         for (size_t i = 0; i < boxes.size(); ++i) {
             transRoi(r.data(), g.data(), b.data(), W, boxes[i], crops[i].data());
         }
@@ -181,13 +305,43 @@ int main(int argc, char** argv) {
 
     std::printf("--- CPU 1-thread convert time (avg %d runs) ---\n", args.runs);
     std::printf("  full image trans once:     %.3f ms\n", full_ms);
-    std::printf("  %d box ROI trans (sum):     %.3f ms\n", args.boxes, boxes_ms);
-    std::printf("  per box avg:               %.3f ms\n", boxes_ms / args.boxes);
-    std::printf("  full / boxes:              %.2fx\n", full_ms / std::max(boxes_ms, 1e-9));
-    if (boxes_ms < full_ms) {
-        std::printf("  => ROI path faster for this workload\n");
+    std::printf("  %d box ROI trans (sum):     %.3f ms\n", args.boxes, boxes_1t_ms);
+    std::printf("  per box avg:               %.3f ms\n", boxes_1t_ms / args.boxes);
+    std::printf("  full / boxes_1t:           %.2fx\n\n", full_ms / std::max(boxes_1t_ms, 1e-9));
+
+    const int max_pool = std::min(args.boxes, static_cast<int>(hw));
+    const std::vector<int> sweep = threadSweep(max_pool);
+
+    std::printf("--- box ROI MT (persistent pool, convert only) ---\n");
+    std::printf("  %-10s %10s %10s %12s\n", "threads", "ms", "vs_1t", "vs_full");
+    double best_ms = boxes_1t_ms;
+    int best_t = 1;
+    for (int t : sweep) {
+        BoxWorkerPool pool(t, r.data(), g.data(), b.data(), W, &boxes, &crops);
+        // warm pool once before timed runs
+        pool.runAll();
+        const double ms = benchMs(args.warmup, args.runs, [&] { pool.runAll(); });
+        std::printf("  pool%-5d  %10.3f %9.2fx %11.2fx\n", t, ms, boxes_1t_ms / std::max(ms, 1e-9),
+                    full_ms / std::max(ms, 1e-9));
+        if (ms < best_ms) {
+            best_ms = ms;
+            best_t = t;
+        }
+    }
+
+    const double when_all_ms = benchMs(args.warmup, args.runs, [&] {
+        runWhenAll(r.data(), g.data(), b.data(), W, boxes, crops);
+    });
+    std::printf("  when_all   %10.3f %9.2fx %11.2fx  (spawn %d threads/run)\n", when_all_ms,
+                boxes_1t_ms / std::max(when_all_ms, 1e-9), full_ms / std::max(when_all_ms, 1e-9),
+                args.boxes);
+
+    std::printf("\n  best pool: %d threads (%.3f ms)\n", best_t, best_ms);
+    if (when_all_ms <= best_ms * 1.08) {
+        std::printf("  => when_all ≈ best pool; OK to fire all boxes if N is small (~%d)\n",
+                    args.boxes);
     } else {
-        std::printf("  => full path not slower (unexpected for small boxes)\n");
+        std::printf("  => prefer pool(~%d); when_all pays spawn/oversubscribe\n", best_t);
     }
     return 0;
 }

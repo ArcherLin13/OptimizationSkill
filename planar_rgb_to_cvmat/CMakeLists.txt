@@ -3,7 +3,7 @@ project(planar_rgb_to_cvmat LANGUAGES CXX)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
-# CPU 1-thread: full trans vs box ROI trans (no OpenCL / OpenCV)
+# CPU: full vs box ROI + MT thread sweep / when_all (no OpenCL / OpenCV)
 add_executable(test_roi_crop
     device_test/test_roi_crop.cpp
     device_test/neon_planar_to_cv32fc3.cpp
