@@ -9,6 +9,7 @@
 #include "opencl_dynload.h"
 #endif
 #include "neon_planar_to_cv32fc3.h"
+#include "dma_buf_cl_import.h"
 
 #include <algorithm>
 #include <chrono>
@@ -675,6 +676,17 @@ int main(int argc, char** argv) {
                                      "float 8px/WI", r, g, b, ref);
 
     std::printf("NEON: %s\n", neon_planar_available() ? "enabled" : "fallback scalar");
+    std::printf("DMA-BUF import (cl_arm_import_memory): %s\n",
+                clHasArmImportMemory(plat) ? "YES — use for ION zero-copy" : "no");
+    std::printf("%s\n", dmaBufImportHint());
+    std::printf("\n");
+    std::printf("=== ION / DMA-BUF scenario (your real path) ===\n");
+    std::printf("  If planar RGB already lives in ION:\n");
+    std::printf("    ion_fd --clImportDmaBuf--> cl_mem --GPU kernel--> cl_mem (dst ION)\n");
+    std::printf("  Then GPU IS the right place. No H2D. Numbers below 'GPU *' ARE that case\n");
+    std::printf("  (buffers already on device). Comparing to NEON only matters if you would\n");
+    std::printf("  map ION to CPU, convert, and map back — usually worse for a GPU pipeline.\n\n");
+
     std::printf("Timing: convert only (CPU wall around convert; GPU = CL kernel profiling)\n");
     std::printf("         MT uses persistent threads (spawn/join NOT counted)\n\n");
 
@@ -683,12 +695,13 @@ int main(int argc, char** argv) {
     std::printf("  %-12s  %8.3f  %8.3f\n", "scalar", cpu_1t_ms, cpu_mt_ms);
     std::printf("  %-12s  %8.3f  %8.3f  max_diff=%.3e %s\n", "NEON", neon_1t_ms, neon_mt_ms,
                 neon_diff, neon_ok ? "OK" : "FAIL");
-    std::printf("  %-12s  %8.3f  %8s\n", "GPU 1px", c1.gpu_ms, "-");
-    std::printf("  %-12s  %8.3f  %8s\n", "GPU 8px", c8.gpu_ms, "-");
+    std::printf("  %-12s  %8.3f  %8s   (device-resident = ION-like)\n", "GPU 1px", c1.gpu_ms, "-");
+    std::printf("  %-12s  %8.3f  %8s   (device-resident = ION-like)\n", "GPU 8px", c8.gpu_ms, "-");
     std::printf("\n  N = %d threads\n", cpu_threads);
     std::printf("  NEON vs scalar (1t): %.2fx\n", cpu_1t_ms / neon_1t_ms);
     std::printf("  NEON vs scalar (Nt): %.2fx\n", cpu_mt_ms / neon_mt_ms);
-    std::printf("  GPU8 vs NEON 1t:     %.2fx\n", neon_1t_ms / c8.gpu_ms);
+    std::printf("  GPU8 vs NEON 1t:     %.2fx  (same DRAM; GPU wins if next stage stays on GPU)\n",
+                neon_1t_ms / c8.gpu_ms);
     std::printf("  GPU8 vs NEON Nt:     %.2fx\n", neon_mt_ms / c8.gpu_ms);
 
     bool all_ok = neon_ok && c1.ok && c8.ok;

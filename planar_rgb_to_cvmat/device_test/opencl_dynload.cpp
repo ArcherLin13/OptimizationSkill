@@ -43,6 +43,10 @@ CL_DYN(cl_int) (*clReleaseProgram_dyn)(cl_program);
 CL_DYN(cl_int) (*clReleaseCommandQueue_dyn)(cl_command_queue);
 CL_DYN(cl_int) (*clReleaseContext_dyn)(cl_context);
 CL_DYN(cl_int) (*clReleaseEvent_dyn)(cl_event);
+CL_DYN(cl_int) (*clGetPlatformInfo_dyn)(cl_platform_id, cl_platform_info, size_t, void*, size_t*);
+void*(CL_API_CALL* clGetExtensionFunctionAddressForPlatform_dyn)(cl_platform_id, const char*) =
+    nullptr;
+void*(CL_API_CALL* clGetExtensionFunctionAddress_dyn)(const char*) = nullptr;
 
 bool opencl_load() {
     static const char* kPaths[] = {
@@ -90,5 +94,14 @@ bool opencl_load() {
     LOAD(clReleaseCommandQueue);
     LOAD(clReleaseContext);
     LOAD(clReleaseEvent);
+    LOAD(clGetPlatformInfo);
+
+    // Optional extension resolvers (do not fail if missing).
+    clGetExtensionFunctionAddressForPlatform_dyn =
+        reinterpret_cast<decltype(clGetExtensionFunctionAddressForPlatform_dyn)>(
+            dlsym(handle, "clGetExtensionFunctionAddressForPlatform"));
+    clGetExtensionFunctionAddress_dyn =
+        reinterpret_cast<decltype(clGetExtensionFunctionAddress_dyn)>(
+            dlsym(handle, "clGetExtensionFunctionAddress"));
     return true;
 }

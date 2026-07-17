@@ -23,8 +23,7 @@ $Ninja = Join-Path $OhosNative "build-tools\cmake\bin\ninja.exe"
 foreach ($p in @($Toolchain, $Cmake, $Ninja)) {
     if (-not (Test-Path -LiteralPath $p)) {
         Write-Host "Missing: $p"
-        Write-Host "Pass -OhosNative to your DevEco native SDK, e.g.:"
-        Write-Host '  .\scripts\build_ohos.ps1 -OhosNative "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"'
+        Write-Host "Pass -OhosNative to your DevEco native SDK"
         exit 1
     }
 }
@@ -35,7 +34,6 @@ if (Test-Path -LiteralPath $BuildDir) {
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
 $OpenClHeaders = (Resolve-Path (Join-Path $Root "..\ocr_softmax_bench\third_party\OpenCL-Headers")).Path
-# Forward slashes avoid some CMake/Ninja path parsing issues on Windows
 $ToolchainUnix = $Toolchain -replace '\\', '/'
 $NinjaUnix = $Ninja -replace '\\', '/'
 $OpenClHeadersUnix = $OpenClHeaders -replace '\\', '/'
@@ -71,18 +69,24 @@ if (-not (Test-Path -LiteralPath $NinjaFile)) {
     exit 1
 }
 
-# Prefer invoking ninja directly (more reliable than cmake --build with spaced paths)
 Push-Location $BuildDir
 try {
-    & $Ninja test_roi_crop ocl_test_planar
+    & $Ninja test_roi_crop
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "Ninja build FAILED (exit $LASTEXITCODE)."
+        Write-Host "Ninja build FAILED for test_roi_crop (exit $LASTEXITCODE)."
         exit $LASTEXITCODE
     }
+    Write-Host "Built: $BuildDir\test_roi_crop"
+
+    & $Ninja ocl_test_planar
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Warning: ocl_test_planar failed - ROI test binary is still ready."
+        Write-Host "Next: .\scripts\run_roi_crop.ps1"
+        exit 0
+    }
+    Write-Host "Built: $BuildDir\ocl_test_planar"
 } finally {
     Pop-Location
 }
 
-Write-Host "Built: $BuildDir\test_roi_crop"
-Write-Host "Built: $BuildDir\ocl_test_planar"
-Write-Host "Next:  .\scripts\run_roi_crop.ps1"
+Write-Host "Next: .\scripts\run_roi_crop.ps1"

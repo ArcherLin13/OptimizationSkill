@@ -46,6 +46,12 @@ extern CL_DYN(cl_int) (*clReleaseProgram_dyn)(cl_program);
 extern CL_DYN(cl_int) (*clReleaseCommandQueue_dyn)(cl_command_queue);
 extern CL_DYN(cl_int) (*clReleaseContext_dyn)(cl_context);
 extern CL_DYN(cl_int) (*clReleaseEvent_dyn)(cl_event);
+extern CL_DYN(cl_int) (*clGetPlatformInfo_dyn)(cl_platform_id, cl_platform_info, size_t, void*,
+                                               size_t*);
+// Optional (may be null):
+extern void*(CL_API_CALL* clGetExtensionFunctionAddressForPlatform_dyn)(cl_platform_id,
+                                                                        const char*);
+extern void*(CL_API_CALL* clGetExtensionFunctionAddress_dyn)(const char*);
 
 #define clGetPlatformIDs clGetPlatformIDs_dyn
 #define clGetDeviceIDs clGetDeviceIDs_dyn
@@ -70,3 +76,4 @@ extern CL_DYN(cl_int) (*clReleaseEvent_dyn)(cl_event);
 #define clReleaseCommandQueue clReleaseCommandQueue_dyn
 #define clReleaseContext clReleaseContext_dyn
 #define clReleaseEvent clReleaseEvent_dyn
+#define clGetPlatformInfo clGetPlatformInfo_dyn
