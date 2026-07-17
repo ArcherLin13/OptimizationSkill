@@ -1,27 +1,73 @@
-# Planar RGB → `cv::Mat` (`CV_32FC3`) OpenCL kernel
+# Planar RGB → `cv::Mat` (`CV_32FC3`) OpenCL / NEON
 
-Converts **planar** RGB (full R plane, then G, then B) into OpenCV **interleaved** `CV_32FC3` (BGR float by default).
+Converts **planar** RGB (R plane | G plane | B plane) into OpenCV **interleaved** `CV_32FC3` (BGR float).
+
+## ION / DMA-BUF：可以用 GPU，而且应该用
+
+如果你的图已经在 **ION / DMA-BUF** 里，GPU 可以直接 `clImportMemoryARM(DMA_BUF)` 绑成 `cl_mem`，**没有 H2D 拷贝**。这种场景下：
+
+| 做法 | 评价 |
+|------|------|
+| GPU kernel 转 `CV_32FC3`（dst 也在 ION） | **正确路径** — 下一环还是 GPU/ISP 时更合适 |
+| map ION → CPU NEON → 再给 GPU | 多一次 CPU 触碰 + cache 同步，通常更差 |
+| 和 NEON 比 “谁更快” | 都是打同一块 DRAM；GPU 时间接近 NEON 很正常 |
+
+之前说 “prefer NEON” 是针对：**数据在普通 host 堆、还要 `clEnqueueWrite/Read`** 的 bench。那不是你的 ION 流水线。
+
+```text
+camera/ISP ION (planar RGB)
+        │  clImportDmaBuf(fd)     ← zero-copy
+        ▼
+   cl_mem src
+        │  planar_rgb_to_cv32fc3_ppx
+        ▼
+   cl_mem dst (also ION / DMA-BUF)
+        │
+        ▼
+   next GPU / NPU / display stage
+```
+
+Helper: `device_test/dma_buf_cl_import.h`
+
+```cpp
+#include "dma_buf_cl_import.h"
+
+cl_int err = 0;
+cl_mem src = clImportDmaBuf(ctx, plat, CL_MEM_READ_ONLY, ion_fd_src, nbytes, &err);
+cl_mem dst = clImportDmaBuf(ctx, plat, CL_MEM_WRITE_ONLY, ion_fd_dst, nbytes_out, &err);
+// then set kernel args to src/dst — no WriteBuffer / ReadBuffer
+```
+
+设备上会打印：`DMA-BUF import (cl_arm_import_memory): YES/no`。
 
 ## Layout
 
 | | Memory |
 |---|--------|
-| **Input** | `R[0..N)`, `G[0..N)`, `B[0..N)` contiguous planes (`N = height * stride`) |
+| **Input** | `R[0..N)`, `G[0..N)`, `B[0..N)` contiguous planes |
 | **Output** | OpenCV `CV_32FC3`: per pixel `[B, G, R]` float |
 
-## NEON (CPU, recommended for host Mat)
+## ROI crop（替代 `rgb_mat(roi)`）
 
-**Why NEON may not beat “scalar”:** the convert is **memory-bound** (~24 bytes/pixel). Once DRAM is saturated, SIMD cannot go faster. Also `clang -O2` often **auto-vectorizes** the simple scalar loop into NEON already, so times look identical unless you disable auto-vec (the device bench does that for the scalar path now). Prefer **more threads** over more NEON for this kernel; use GPU only when data already lives on GPU.
+整图是 planar buffer 时，不要先整图 `trans2cv`，对每个 text box：
+
+```cpp
+#include "device_test/planar_roi_crop.h"
+
+// old: cv::Mat crop_aabb = rgb_mat(roi);
+// new:
+cv::Mat crop_aabb = planar::cropAabbFromBuffers(r, g, b, width, height, width, roi);
+// crop_aabb: CV_32FC3 BGR continuous — 可直接 warpPerspective
+```
+
+Packed `[R|G|B]`：`planar::cropAabbFromPlanarPackedF32(planar, w, h, stride, roi)`。
+
+## NEON（仅当必须落到 host 整图 Mat 时）
 
 ```cpp
 #include "device_test/neon_planar_to_cv32fc3.h"
-
-// float planes -> CV_32FC3 BGR (uses vst3q_f32)
 neon_planar_rgb_f32_to_cv32fc3(r, g, b, (float*)mat.data, w, h, w, w * 3);
-// uchar planes -> float BGR (/255)
-neon_planar_rgb_u8_to_cv32fc3(r8, g8, b8, (float*)mat.data, w, h, w, w * 3);
-// multi-thread (row parallel)
-neon_planar_rgb_f32_to_cv32fc3_mt(r, g, b, dst, w, h, w, w * 3, /*threads*/0);
+neon_planar_rgb_f32_to_cv32fc3_mt(r, g, b, dst, w, h, w, w * 3, 0);
 ```
 
 ## HarmonyOS device test
@@ -32,44 +78,11 @@ cd planar_rgb_to_cvmat
 .\scripts\run_device.ps1
 ```
 
-Optional size / runs:
-
-```powershell
-.\scripts\run_device.ps1 -Width 3840 -Height 2160 -Runs 30
-# default is already 3840x2160 (4K)
-```
-
-Default remote path: `/data/local/tmp/planar_rgb`
-
-Expected output:
-
-```text
-Device: ...
-=== results (CPU convert vs GPU kernel, OpenCV BGR float) ===
-  float separate planes         max_diff=...  cpu=X.XX ms  gpu=Y.YY ms  (Z.ZZx)  OK
-  float packed [R|G|B]          max_diff=...  cpu=X.XX ms  gpu=Y.YY ms  (Z.ZZx)  OK
-  uchar separate (/255)         max_diff=...  cpu=X.XX ms  gpu=Y.YY ms  (Z.ZZx)  OK
-```
-
-`cpu` = host planar→`CV_32FC3` convert time; `gpu` = OpenCL kernel only (no H2D/D2H).
+`GPU *` 行 = **设备常驻**（等价于 ION 已 import 后的 kernel 时间）。
 
 ## Kernels
 
-| Kernel | Use when |
-|--------|----------|
-| `planar_rgb_to_cv32fc3` | Separate planes, **1 pixel / work-item** (baseline) |
-| `planar_rgb_to_cv32fc3_ppx` | Separate planes, **N pixels / WI** + `vload4` (faster) |
-| `planar_rgb_packed_to_cv32fc3` / `_ppx` | One buffer: `[R\|G\|B]` |
-
-NDRange for `*_ppx`: `global = (ceil(width / PIXELS_PER_WI), height)`.
-
-## Compile flags
-
-| Flag | Effect |
-|------|--------|
-| *(none)* | `float` planes → float BGR |
-| `-DINPUT_UCHAR` | `uchar` planes, scale `/255` |
-| `-DOUT_RGB` | write RGB instead of OpenCV BGR |
-| `-DPIXELS_PER_WI=8` | pixels per work-item for `*_ppx` (try 4 / 8 / 16) |
-
-Device test compares **1px vs 4/8/16 px/WI** so you can pick the best on your GPU.
+| Kernel | Use |
+|--------|-----|
+| `planar_rgb_to_cv32fc3_ppx` | 推荐；`-DPIXELS_PER_WI=8` |
+| `planar_rgb_packed_to_cv32fc3_ppx` | 单 buffer `[R\|G\|B]` |
