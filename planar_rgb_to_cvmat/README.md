@@ -62,6 +62,25 @@ cv::Mat crop_aabb = planar::cropAabbFromBuffers(r, g, b, width, height, width, r
 
 Packed `[R|G|B]`：`planar::cropAabbFromPlanarPackedF32(planar, w, h, stride, roi)`。
 
+### 怎么测（HarmonyOS）— 默认就是你的场景
+
+```powershell
+cd planar_rgb_to_cvmat
+.\scripts\build_ohos.ps1
+.\scripts\run_roi_crop.ps1
+# 默认: 4096x3072, 16 boxes of 1000x150
+```
+
+自定义：
+
+```powershell
+.\scripts\run_roi_crop.ps1 -Width 4096 -Height 3072 -Boxes 16 -BoxW 1000 -BoxH 150 -Runs 30
+```
+
+输出会对比：
+- 正确性：ROI crop == 整图 trans 再 crop（等价 `rgb_mat(roi)`）
+- 耗时：整图 trans 一次 vs 16 次 ROI trans 合计
+
 ## NEON（仅当必须落到 host 整图 Mat 时）
 
 ```cpp

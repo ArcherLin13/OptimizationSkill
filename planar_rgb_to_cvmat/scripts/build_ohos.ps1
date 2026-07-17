@@ -40,5 +40,6 @@ $cmakeArgs = @(
 )
 
 & $Cmake @cmakeArgs
-& $Cmake --build $BuildDir --target ocl_test_planar
+& $Cmake --build $BuildDir --target ocl_test_planar test_roi_crop
 Write-Host "Built: $BuildDir\ocl_test_planar"
+Write-Host "Built: $BuildDir\test_roi_crop"
