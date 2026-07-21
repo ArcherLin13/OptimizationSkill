@@ -175,11 +175,17 @@ void fillHalfImage(std::vector<uint16_t>& img, int w, int h, float& ref_max) {
     const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
     img.resize(n);
     ref_max = -1e30f;
+    // Peak MUST be < 1 so enhance actually scales (divisor=max, inv=1/max).
+    // Old peak 12.5 made divisor=1 → enhance no-op → false OK even if enhance never ran.
+    const float kPeak = 0.25f;
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            float v = static_cast<float>(((x * 13 + y * 7) % 1000)) / 1000.f;
+            float v = static_cast<float>(((x * 13 + y * 7) % 1000)) / 1000.f;  // [0,1)
+            if (v >= kPeak) {
+                v = kPeak * 0.5f;  // keep unique global max at injected pixel
+            }
             if (x == w * 2 / 3 && y == h * 3 / 5) {
-                v = 12.5f;
+                v = kPeak;
             }
             img[static_cast<size_t>(y) * w + x] = floatToHalf(v);
             ref_max = std::max(ref_max, v);
@@ -201,6 +207,14 @@ float maxAbsDiffHalf(const std::vector<uint16_t>& a, const std::vector<uint16_t>
         m = std::max(m, std::fabs(halfToFloat(a[i]) - halfToFloat(b[i])));
     }
     return m;
+}
+
+float meanAbsDiffHalf(const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
+    double s = 0.0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        s += std::fabs(halfToFloat(a[i]) - halfToFloat(b[i]));
+    }
+    return static_cast<float>(s / static_cast<double>(a.size()));
 }
 
 cl_program buildProgram(cl_context ctx, cl_device_id device, const std::string& path,
@@ -334,12 +348,36 @@ int main(int argc, char** argv) {
 
     std::vector<uint16_t> out(nPix);
     auto checkOut = [&](const char* tag) {
+        // 1) max_value must match ref_max
+        uint32_t max_bits = 0;
+        OCL_CHECK(clEnqueueReadBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &max_bits, 0,
+                                      nullptr, nullptr),
+                  "read max");
+        const float gpu_max = halfToFloat(static_cast<uint16_t>(max_bits & 0xffffu));
+        const float max_err = std::fabs(gpu_max - ref_max);
+
+        // 2) image vs CPU enhanced ref
         OCL_CHECK(clEnqueueReadBuffer(queue, buf_src, CL_TRUE, 0, bytes, out.data(), 0, nullptr,
                                       nullptr),
-                  "read");
-        const float diff = maxAbsDiffHalf(out, host_ref);
-        std::printf("[%s] vs CPU: max_abs_diff=%.3e %s\n", tag, diff, diff < 2e-2f ? "OK" : "FAIL");
-        if (diff >= 2e-2f) {
+                  "read src");
+        const float vs_ref = maxAbsDiffHalf(out, host_ref);
+        const float vs_in = meanAbsDiffHalf(out, host_src);
+        const float div = std::min(1.0f, ref_max);
+        const bool must_scale = div < 1.0f - 1e-6f;
+
+        const bool ok_max = max_err < 1e-2f;
+        const bool ok_img = vs_ref < 2e-2f;
+        // If max<1, enhance must change the image; otherwise the check is vacuous.
+        const bool ok_changed = !must_scale || (vs_in > 1e-3f);
+
+        std::printf("[%s]\n", tag);
+        std::printf("    gpu_max=%.6f ref_max=%.6f max_err=%.3e %s\n", gpu_max, ref_max, max_err,
+                    ok_max ? "OK" : "FAIL");
+        std::printf("    vs CPU enhance: max_abs_diff=%.3e %s\n", vs_ref, ok_img ? "OK" : "FAIL");
+        std::printf("    vs input (mean abs): %.3e  (divisor=%.4f, must_scale=%s) %s\n", vs_in, div,
+                    must_scale ? "yes" : "no", ok_changed ? "OK" : "FAIL(no-op?)");
+        if (!ok_max || !ok_img || !ok_changed) {
+            std::fprintf(stderr, "CORRECTNESS FAIL on %s\n", tag);
             std::exit(1);
         }
     };
@@ -352,7 +390,8 @@ int main(int argc, char** argv) {
     std::printf("#   (old multi-WG grid-sync fused -> CL_-14, removed)\n");
     std::printf("##############################################################\n");
     std::printf("device: %s\n", deviceName(device).c_str());
-    std::printf("size: %d x %d  ref_max=%.4f divisor=%.4f\n", W, H, ref_max, std::min(1.f, ref_max));
+    std::printf("size: %d x %d  ref_max=%.4f divisor=%.4f inv=%.4f  (max<1 so enhance is NOT no-op)\n",
+                W, H, ref_max, std::min(1.f, ref_max), 1.f / std::min(1.f, ref_max));
     std::printf("[A] gws=(%zu,%zu) lws=(%zu,%zu)\n", gws2[0], gws2[1], lws2[0], lws2[1]);
     std::printf("[B] gws=%zu lws=%zu (nwg=1)\n", gws_fu, lws_fu);
     std::printf("[C] gws=%zu lws=%zu nwg=%d\n\n", gws_o, lws_o, args.nwg);
