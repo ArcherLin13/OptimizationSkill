@@ -1,17 +1,14 @@
-# findMaxValue / enhanceBrightness OpenCL bench
+# findMax / enhanceBrightness OpenCL bench
 
-## findmax only
+## Pipeline (`run_enhance.ps1`)
 
-`orig` vs `base_1px` vs `opt_stride` — see `.\scripts\run_device.ps1`.
-
-## findmax + enhanceBrightness
-
-| path | kernels |
+| path | what |
 |---|---|
-| **baseline** | `findmax_orig_2d` + `enhance_brightness`（2 次 enqueue） |
-| **fused** | `findMaxAndEnhance`：基于 opt 的 grid-stride/`half4`，phase1 max + grid sync + phase2 enhance（1 次 enqueue） |
+| **A baseline** | `findmax_orig_2d` + `enhance_brightness`（2 kernels, 2D 1px） |
+| **B fused** | `findMaxAndEnhance` **1 kernel, 1 workgroup**（只有 local barrier；跨 WG spin 会 CL_-14） |
+| **C opt** | `findmax_opt` + `enhance_brightness_opt`（2 kernels, stride/`half4`，通常最快） |
 
-Enhance: `divisor = fmin(1, max_value)`，`src *= 1/divisor`（in-place）。
+Enhance: `divisor=fmin(1,max)`, `src *= 1/divisor`.
 
 ```powershell
 cd findmax_bench
@@ -19,4 +16,6 @@ cd findmax_bench
 .\scripts\run_enhance.ps1
 ```
 
-输出会校验整图 vs CPU，并报 baseline（findmax+enhance 分段/合计）与 fused 的 kernel 耗时。
+## findmax only
+
+`.\scripts\run_device.ps1`

@@ -1,10 +1,8 @@
-// Baseline: orig findMaxValue + enhanceBrightness (2 kernels)
-// Opt:     findMaxAndEnhance fused (1 kernel, based on opt_stride)
-// Default: 5760x4320 half image. Kernel time only. Correctness vs CPU.
+// Baseline: orig findMax + enhanceBrightness (2 kernels, 2D 1px)
+// Fused:   findMaxAndEnhance 1-kernel, SINGLE workgroup (no cross-WG spin)
+// Opt:     findmax_opt + enhance_opt (2 kernels, grid-stride/half4) — fast path
 //
-// Usage:
-//   ./ocl_test_enhance [--width 5760] [--height 4320] [--runs 30]
-//                       [--lwsx 16] [--lwsy 16] [--lws-opt 256] [--nwg 256]
+// Note: multi-WG grid-sync fused caused CL_-14 on device; removed.
 
 #include <CL/cl.h>
 #ifdef OCR_OPENCL_DLOPEN
@@ -33,9 +31,11 @@ namespace {
     } while (0)
 
 struct Args {
-    std::string findmax_path = "findmax_orig_2d.cl";
-    std::string enhance_path = "enhance_brightness.cl";
+    std::string findmax_orig = "findmax_orig_2d.cl";
+    std::string enhance_base = "enhance_brightness.cl";
     std::string fused_path = "findmax_enhance_fused.cl";
+    std::string findmax_opt = "findmax_opt.cl";
+    std::string enhance_opt = "enhance_brightness_opt.cl";
     int width = 5760;
     int height = 4320;
     int runs = 30;
@@ -49,13 +49,19 @@ struct Args {
 Args parseArgs(int argc, char** argv) {
     Args a;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--findmax") == 0 && i + 1 < argc) {
-            a.findmax_path = argv[++i];
-        } else if (std::strcmp(argv[i], "--enhance") == 0 && i + 1 < argc) {
-            a.enhance_path = argv[++i];
-        } else if (std::strcmp(argv[i], "--fused") == 0 && i + 1 < argc) {
-            a.fused_path = argv[++i];
-        } else if (std::strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
+        auto take = [&](const char* key, std::string& dst) {
+            if (std::strcmp(argv[i], key) == 0 && i + 1 < argc) {
+                dst = argv[++i];
+                return true;
+            }
+            return false;
+        };
+        if (take("--findmax", a.findmax_orig) || take("--enhance", a.enhance_base) ||
+            take("--fused", a.fused_path) || take("--findmax-opt", a.findmax_opt) ||
+            take("--enhance-opt", a.enhance_opt)) {
+            continue;
+        }
+        if (std::strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
             a.width = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
             a.height = std::atoi(argv[++i]);
@@ -105,7 +111,13 @@ std::string deviceName(cl_device_id dev) {
 
 double profileMs(cl_event ev) {
     cl_ulong t0 = 0, t1 = 0;
+    cl_int st = CL_SUCCESS;
     OCL_CHECK(clWaitForEvents(1, &ev), "clWaitForEvents");
+    clGetEventInfo(ev, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(st), &st, nullptr);
+    if (st < 0) {
+        std::fprintf(stderr, "event exec status %d (negative = error)\n", st);
+        std::exit(1);
+    }
     OCL_CHECK(clGetEventProfilingInfo(ev, CL_PROFILING_COMMAND_START, sizeof(t0), &t0, nullptr),
               "START");
     OCL_CHECK(clGetEventProfilingInfo(ev, CL_PROFILING_COMMAND_END, sizeof(t1), &t1, nullptr),
@@ -211,10 +223,16 @@ cl_program buildProgram(cl_context ctx, cl_device_id device, const std::string& 
     return prog;
 }
 
+void set4(cl_kernel kn, cl_mem src, unsigned w, unsigned h, cl_mem mx) {
+    OCL_CHECK(clSetKernelArg(kn, 0, sizeof(cl_mem), &src), "a0");
+    OCL_CHECK(clSetKernelArg(kn, 1, sizeof(unsigned), &w), "a1");
+    OCL_CHECK(clSetKernelArg(kn, 2, sizeof(unsigned), &h), "a2");
+    OCL_CHECK(clSetKernelArg(kn, 3, sizeof(cl_mem), &mx), "a3");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    // hdc shell often fully-buffers stdout; force immediate flush so timing lines show up.
     setvbuf(stdout, nullptr, _IONBF, 0);
     setvbuf(stderr, nullptr, _IONBF, 0);
 
@@ -257,59 +275,55 @@ int main(int argc, char** argv) {
     cl_command_queue queue = clCreateCommandQueue(ctx, device, CL_QUEUE_PROFILING_ENABLE, &err);
     OCL_CHECK(err, "queue");
 
-    char opts_fused[128];
-    std::snprintf(opts_fused, sizeof(opts_fused), "-cl-std=CL1.2 -DLSIZE=%d", args.lws_opt);
+    char opts_lsize[128];
+    std::snprintf(opts_lsize, sizeof(opts_lsize), "-cl-std=CL1.2 -DLSIZE=%d", args.lws_opt);
 
-    cl_program prog_fm = buildProgram(ctx, device, args.findmax_path, "-cl-std=CL1.2");
-    cl_program prog_en = buildProgram(ctx, device, args.enhance_path, "-cl-std=CL1.2");
-    cl_program prog_fu = buildProgram(ctx, device, args.fused_path, opts_fused);
+    cl_program p_fm = buildProgram(ctx, device, args.findmax_orig, "-cl-std=CL1.2");
+    cl_program p_en = buildProgram(ctx, device, args.enhance_base, "-cl-std=CL1.2");
+    cl_program p_fu = buildProgram(ctx, device, args.fused_path, opts_lsize);
+    cl_program p_fmo = buildProgram(ctx, device, args.findmax_opt, opts_lsize);
+    cl_program p_eno = buildProgram(ctx, device, args.enhance_opt, opts_lsize);
 
-    cl_kernel kn_fm = clCreateKernel(prog_fm, "findMaxValue", &err);
-    OCL_CHECK(err, "findMaxValue");
-    cl_kernel kn_en = clCreateKernel(prog_en, "enhanceBrightness", &err);
-    OCL_CHECK(err, "enhanceBrightness");
-    cl_kernel kn_fu = clCreateKernel(prog_fu, "findMaxAndEnhance", &err);
-    OCL_CHECK(err, "findMaxAndEnhance");
+    cl_kernel kn_fm = clCreateKernel(p_fm, "findMaxValue", &err);
+    OCL_CHECK(err, "findMaxValue orig");
+    cl_kernel kn_en = clCreateKernel(p_en, "enhanceBrightness", &err);
+    OCL_CHECK(err, "enhance base");
+    cl_kernel kn_fu = clCreateKernel(p_fu, "findMaxAndEnhance", &err);
+    OCL_CHECK(err, "fused");
+    cl_kernel kn_fmo = clCreateKernel(p_fmo, "findMaxValue", &err);
+    OCL_CHECK(err, "findMax opt");
+    cl_kernel kn_eno = clCreateKernel(p_eno, "enhanceBrightness", &err);
+    OCL_CHECK(err, "enhance opt");
 
     cl_mem buf_src = clCreateBuffer(ctx, CL_MEM_READ_WRITE, bytes, nullptr, &err);
     OCL_CHECK(err, "buf_src");
-    cl_mem buf_gold = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes, host_src.data(),
-                                     &err);
+    cl_mem buf_gold =
+        clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes, host_src.data(), &err);
     OCL_CHECK(err, "buf_gold");
     cl_mem buf_max = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
     OCL_CHECK(err, "buf_max");
-    cl_mem buf_sync = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_int) * 2, nullptr, &err);
-    OCL_CHECK(err, "buf_sync");
 
-    const unsigned int wu = static_cast<unsigned int>(W);
-    const unsigned int hu = static_cast<unsigned int>(H);
-
-    OCL_CHECK(clSetKernelArg(kn_fm, 0, sizeof(cl_mem), &buf_src), "fm0");
-    OCL_CHECK(clSetKernelArg(kn_fm, 1, sizeof(unsigned int), &wu), "fm1");
-    OCL_CHECK(clSetKernelArg(kn_fm, 2, sizeof(unsigned int), &hu), "fm2");
-    OCL_CHECK(clSetKernelArg(kn_fm, 3, sizeof(cl_mem), &buf_max), "fm3");
-
-    OCL_CHECK(clSetKernelArg(kn_en, 0, sizeof(cl_mem), &buf_src), "en0");
-    OCL_CHECK(clSetKernelArg(kn_en, 1, sizeof(unsigned int), &wu), "en1");
-    OCL_CHECK(clSetKernelArg(kn_en, 2, sizeof(unsigned int), &hu), "en2");
-    OCL_CHECK(clSetKernelArg(kn_en, 3, sizeof(cl_mem), &buf_max), "en3");
-
-    OCL_CHECK(clSetKernelArg(kn_fu, 0, sizeof(cl_mem), &buf_src), "fu0");
-    OCL_CHECK(clSetKernelArg(kn_fu, 1, sizeof(unsigned int), &wu), "fu1");
-    OCL_CHECK(clSetKernelArg(kn_fu, 2, sizeof(unsigned int), &hu), "fu2");
-    OCL_CHECK(clSetKernelArg(kn_fu, 3, sizeof(cl_mem), &buf_max), "fu3");
-    OCL_CHECK(clSetKernelArg(kn_fu, 4, sizeof(cl_mem), &buf_sync), "fu4");
+    const unsigned wu = (unsigned)W, hu = (unsigned)H;
+    set4(kn_fm, buf_src, wu, hu, buf_max);
+    set4(kn_en, buf_src, wu, hu, buf_max);
+    set4(kn_fu, buf_src, wu, hu, buf_max);
+    set4(kn_fmo, buf_src, wu, hu, buf_max);
+    set4(kn_eno, buf_src, wu, hu, buf_max);
 
     size_t gws2[2] = {((size_t)W + args.lwsx - 1) / args.lwsx * args.lwsx,
                       ((size_t)H + args.lwsy - 1) / args.lwsy * args.lwsy};
     size_t lws2[2] = {(size_t)args.lwsx, (size_t)args.lwsy};
-    size_t gws1 = (size_t)args.lws_opt * (size_t)args.nwg;
-    size_t lws1 = (size_t)args.lws_opt;
+    // Fused: MUST be single WG (local barrier only).
+    size_t lws_fu = (size_t)args.lws_opt;
+    size_t gws_fu = lws_fu;
+    // Opt 2-kernel: multi-WG stride
+    size_t lws_o = (size_t)args.lws_opt;
+    size_t gws_o = lws_o * (size_t)args.nwg;
 
     auto restoreSrc = [&] {
         OCL_CHECK(clEnqueueCopyBuffer(queue, buf_gold, buf_src, 0, 0, bytes, 0, nullptr, nullptr),
-                  "restore src");
-        OCL_CHECK(clFinish(queue), "restore finish");
+                  "restore");
+        OCL_CHECK(clFinish(queue), "restore fin");
     };
     auto resetMax = [&] {
         uint32_t init = floatToHalf(-65504.0f);
@@ -317,161 +331,171 @@ int main(int argc, char** argv) {
                                        nullptr, nullptr),
                   "reset max");
     };
-    auto resetSync = [&] {
-        int z[2] = {0, 0};
-        OCL_CHECK(clEnqueueWriteBuffer(queue, buf_sync, CL_TRUE, 0, sizeof(z), z, 0, nullptr, nullptr),
-                  "reset sync");
-    };
 
     std::vector<uint16_t> out(nPix);
-
     auto checkOut = [&](const char* tag) {
         OCL_CHECK(clEnqueueReadBuffer(queue, buf_src, CL_TRUE, 0, bytes, out.data(), 0, nullptr,
                                       nullptr),
-                  "read out");
+                  "read");
         const float diff = maxAbsDiffHalf(out, host_ref);
-        std::printf("[%s] vs CPU enhance: max_abs_diff=%.3e %s\n", tag, diff,
-                    diff < 2e-2f ? "OK" : "FAIL");
+        std::printf("[%s] vs CPU: max_abs_diff=%.3e %s\n", tag, diff, diff < 2e-2f ? "OK" : "FAIL");
         if (diff >= 2e-2f) {
             std::exit(1);
         }
     };
 
     std::printf("##############################################################\n");
-    std::printf("# PIPELINE: findMaxValue + enhanceBrightness (NOT findmax-only)\n");
-    std::printf("#   enhance: divisor=fmin(1,max);  src[i] *= 1/divisor\n");
-    std::printf("#   A) baseline = 2 kernels (orig findmax THEN enhance)\n");
-    std::printf("#   B) fused    = 1 kernel  (findMaxAndEnhance)\n");
+    std::printf("# PIPELINE: findMax + enhanceBrightness\n");
+    std::printf("#   A) baseline 2k: orig findmax + enhance (2D 1px)\n");
+    std::printf("#   B) fused 1k:    findMaxAndEnhance (SINGLE WG, safe)\n");
+    std::printf("#   C) opt 2k:      findmax_opt + enhance_opt (stride/half4)\n");
+    std::printf("#   (old multi-WG grid-sync fused -> CL_-14, removed)\n");
     std::printf("##############################################################\n");
     std::printf("device: %s\n", deviceName(device).c_str());
-    std::printf("size:   %d x %d  ref_max=%.4f  divisor=fmin(1,max)=%.4f\n", W, H, ref_max,
-                std::min(1.0f, ref_max));
-    std::printf("\n[A] baseline 2-kernel path:\n");
-    std::printf("    1) findMaxValue     <- %s\n", args.findmax_path.c_str());
-    std::printf("    2) enhanceBrightness<- %s\n", args.enhance_path.c_str());
-    std::printf("    launch 2D gws=(%zu,%zu) lws=(%zu,%zu)\n", gws2[0], gws2[1], lws2[0], lws2[1]);
-    std::printf("\n[B] fused 1-kernel path:\n");
-    std::printf("    1) findMaxAndEnhance <- %s\n", args.fused_path.c_str());
-    std::printf("    launch 1D gws=%zu lws=%zu nwg=%d\n\n", gws1, lws1, args.nwg);
+    std::printf("size: %d x %d  ref_max=%.4f divisor=%.4f\n", W, H, ref_max, std::min(1.f, ref_max));
+    std::printf("[A] gws=(%zu,%zu) lws=(%zu,%zu)\n", gws2[0], gws2[1], lws2[0], lws2[1]);
+    std::printf("[B] gws=%zu lws=%zu (nwg=1)\n", gws_fu, lws_fu);
+    std::printf("[C] gws=%zu lws=%zu nwg=%d\n\n", gws_o, lws_o, args.nwg);
 
-    // Correctness
-    std::printf("--- correctness (full image after enhance vs CPU) ---\n");
+    std::printf("--- correctness ---\n");
     restoreSrc();
     resetMax();
     {
         cl_event e0 = nullptr, e1 = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fm, 2, nullptr, gws2, lws2, 0, nullptr, &e0),
-                  "fm corr");
-        OCL_CHECK(clWaitForEvents(1, &e0), "fm wait");
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fm, 2, nullptr, gws2, lws2, 0, nullptr, &e0), "A0");
+        OCL_CHECK(clWaitForEvents(1, &e0), "A0w");
         clReleaseEvent(e0);
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_en, 2, nullptr, gws2, lws2, 0, nullptr, &e1),
-                  "en corr");
-        OCL_CHECK(clWaitForEvents(1, &e1), "en wait");
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_en, 2, nullptr, gws2, lws2, 0, nullptr, &e1), "A1");
+        OCL_CHECK(clWaitForEvents(1, &e1), "A1w");
         clReleaseEvent(e1);
     }
-    checkOut("A_baseline findmax+enhance");
+    checkOut("A baseline");
 
     restoreSrc();
     resetMax();
-    resetSync();
     {
         cl_event e = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fu, 1, nullptr, &gws1, &lws1, 0, nullptr, &e),
-                  "fu corr");
-        OCL_CHECK(clWaitForEvents(1, &e), "fu wait");
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fu, 1, nullptr, &gws_fu, &lws_fu, 0, nullptr, &e),
+                  "B");
+        OCL_CHECK(clWaitForEvents(1, &e), "Bw");
         clReleaseEvent(e);
     }
-    checkOut("B_fused    findMaxAndEnhance");
+    checkOut("B fused 1-WG");
+
+    restoreSrc();
+    resetMax();
+    {
+        cl_event e0 = nullptr, e1 = nullptr;
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fmo, 1, nullptr, &gws_o, &lws_o, 0, nullptr, &e0),
+                  "C0");
+        OCL_CHECK(clWaitForEvents(1, &e0), "C0w");
+        clReleaseEvent(e0);
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_eno, 1, nullptr, &gws_o, &lws_o, 0, nullptr, &e1),
+                  "C1");
+        OCL_CHECK(clWaitForEvents(1, &e1), "C1w");
+        clReleaseEvent(e1);
+    }
+    checkOut("C opt 2k");
     std::printf("correctness done. starting TIMING...\n\n");
 
-    // ----- TIMING A -----
-    std::printf(">>> TIMING [A] baseline 2-kernel (%d warmup + %d runs)...\n", args.warmup, args.runs);
-    for (int i = 0; i < args.warmup; ++i) {
-        restoreSrc();
-        resetMax();
-        cl_event e0 = nullptr, e1 = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fm, 2, nullptr, gws2, lws2, 0, nullptr, &e0), "fm w");
-        OCL_CHECK(clWaitForEvents(1, &e0), "w0");
-        clReleaseEvent(e0);
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_en, 2, nullptr, gws2, lws2, 0, nullptr, &e1), "en w");
-        OCL_CHECK(clWaitForEvents(1, &e1), "w1");
-        clReleaseEvent(e1);
-    }
-    double sum_fm = 0, sum_en = 0, base_best = 1e300;
-    for (int i = 0; i < args.runs; ++i) {
-        restoreSrc();
-        resetMax();
-        OCL_CHECK(clFinish(queue), "fin A");
-        cl_event e0 = nullptr, e1 = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fm, 2, nullptr, gws2, lws2, 0, nullptr, &e0), "fm");
-        const double ms0 = profileMs(e0);
-        clReleaseEvent(e0);
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_en, 2, nullptr, gws2, lws2, 0, nullptr, &e1), "en");
-        const double ms1 = profileMs(e1);
-        clReleaseEvent(e1);
-        sum_fm += ms0;
-        sum_en += ms1;
-        base_best = std::min(base_best, ms0 + ms1);
-        if ((i + 1) == 1 || (i + 1) == args.runs || ((i + 1) % 10) == 0) {
-            std::printf("    [A] run %d/%d  findmax=%.3f ms  enhance=%.3f ms  sum=%.3f ms\n", i + 1,
-                        args.runs, ms0, ms1, ms0 + ms1);
+    auto time2 = [&](const char* tag, cl_kernel k0, int dim0, const size_t* g0, const size_t* l0,
+                     cl_kernel k1, int dim1, const size_t* g1, const size_t* l1) {
+        std::printf(">>> TIMING %s (%d+%d)...\n", tag, args.warmup, args.runs);
+        for (int i = 0; i < args.warmup; ++i) {
+            restoreSrc();
+            resetMax();
+            cl_event e0 = nullptr, e1 = nullptr;
+            OCL_CHECK(clEnqueueNDRangeKernel(queue, k0, dim0, nullptr, g0, l0, 0, nullptr, &e0), "w0");
+            OCL_CHECK(clWaitForEvents(1, &e0), "ww0");
+            clReleaseEvent(e0);
+            OCL_CHECK(clEnqueueNDRangeKernel(queue, k1, dim1, nullptr, g1, l1, 0, nullptr, &e1), "w1");
+            OCL_CHECK(clWaitForEvents(1, &e1), "ww1");
+            clReleaseEvent(e1);
         }
-    }
-    const double fm_ms = sum_fm / args.runs;
-    const double en_ms = sum_en / args.runs;
-    const double base_avg = fm_ms + en_ms;
-    std::printf(">>> [A] DONE  findmax=%.3f  enhance=%.3f  TOTAL=%.3f ms (best %.3f)\n\n", fm_ms, en_ms,
-                base_avg, base_best);
+        double s0 = 0, s1 = 0, best = 1e300;
+        for (int i = 0; i < args.runs; ++i) {
+            restoreSrc();
+            resetMax();
+            OCL_CHECK(clFinish(queue), "fin");
+            cl_event e0 = nullptr, e1 = nullptr;
+            OCL_CHECK(clEnqueueNDRangeKernel(queue, k0, dim0, nullptr, g0, l0, 0, nullptr, &e0), "t0");
+            const double m0 = profileMs(e0);
+            clReleaseEvent(e0);
+            OCL_CHECK(clEnqueueNDRangeKernel(queue, k1, dim1, nullptr, g1, l1, 0, nullptr, &e1), "t1");
+            const double m1 = profileMs(e1);
+            clReleaseEvent(e1);
+            s0 += m0;
+            s1 += m1;
+            best = std::min(best, m0 + m1);
+            if ((i + 1) == 1 || (i + 1) == args.runs || ((i + 1) % 10) == 0) {
+                std::printf("    %s run %d/%d  k0=%.3f k1=%.3f sum=%.3f\n", tag, i + 1, args.runs, m0,
+                            m1, m0 + m1);
+            }
+        }
+        const double a0 = s0 / args.runs, a1 = s1 / args.runs;
+        std::printf(">>> %s DONE  k0=%.3f k1=%.3f TOTAL=%.3f (best %.3f)\n\n", tag, a0, a1, a0 + a1,
+                    best);
+        return std::tuple<double, double, double>{a0, a1, best};
+    };
 
-    // ----- TIMING B -----
-    std::printf(">>> TIMING [B] fused 1-kernel (%d warmup + %d runs)...\n", args.warmup, args.runs);
-    for (int i = 0; i < args.warmup; ++i) {
-        restoreSrc();
-        resetMax();
-        resetSync();
-        cl_event e = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fu, 1, nullptr, &gws1, &lws1, 0, nullptr, &e), "fu w");
-        OCL_CHECK(clWaitForEvents(1, &e), "fu ww");
-        clReleaseEvent(e);
-    }
-    double sum_fu = 0, fu_best = 1e300;
-    for (int i = 0; i < args.runs; ++i) {
-        restoreSrc();
-        resetMax();
-        resetSync();
-        OCL_CHECK(clFinish(queue), "fin B");
-        cl_event e = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fu, 1, nullptr, &gws1, &lws1, 0, nullptr, &e), "fu");
-        const double ms = profileMs(e);
-        clReleaseEvent(e);
-        sum_fu += ms;
-        fu_best = std::min(fu_best, ms);
-        if ((i + 1) == 1 || (i + 1) == args.runs || ((i + 1) % 10) == 0) {
-            std::printf("    [B] run %d/%d  fused=%.3f ms\n", i + 1, args.runs, ms);
+    auto time1 = [&](const char* tag, cl_kernel k, const size_t* g, const size_t* l) {
+        std::printf(">>> TIMING %s (%d+%d)...\n", tag, args.warmup, args.runs);
+        for (int i = 0; i < args.warmup; ++i) {
+            restoreSrc();
+            resetMax();
+            cl_event e = nullptr;
+            OCL_CHECK(clEnqueueNDRangeKernel(queue, k, 1, nullptr, g, l, 0, nullptr, &e), "w");
+            OCL_CHECK(clWaitForEvents(1, &e), "ww");
+            clReleaseEvent(e);
         }
-    }
-    const double fu_ms = sum_fu / args.runs;
-    std::printf(">>> [B] DONE  fused=%.3f ms (best %.3f)\n\n", fu_ms, fu_best);
+        double sum = 0, best = 1e300;
+        for (int i = 0; i < args.runs; ++i) {
+            restoreSrc();
+            resetMax();
+            OCL_CHECK(clFinish(queue), "fin");
+            cl_event e = nullptr;
+            OCL_CHECK(clEnqueueNDRangeKernel(queue, k, 1, nullptr, g, l, 0, nullptr, &e), "t");
+            const double ms = profileMs(e);
+            clReleaseEvent(e);
+            sum += ms;
+            best = std::min(best, ms);
+            if ((i + 1) == 1 || (i + 1) == args.runs || ((i + 1) % 10) == 0) {
+                std::printf("    %s run %d/%d  fused=%.3f\n", tag, i + 1, args.runs, ms);
+            }
+        }
+        const double avg = sum / args.runs;
+        std::printf(">>> %s DONE  fused=%.3f (best %.3f)\n\n", tag, avg, best);
+        return std::pair<double, double>{avg, best};
+    };
+
+    const auto [a0, a1, a_best] = time2("[A]", kn_fm, 2, gws2, lws2, kn_en, 2, gws2, lws2);
+    const auto [b_avg, b_best] = time1("[B]", kn_fu, &gws_fu, &lws_fu);
+    const auto [c0, c1, c_best] = time2("[C]", kn_fmo, 1, &gws_o, &lws_o, kn_eno, 1, &gws_o, &lws_o);
+    const double a_tot = a0 + a1;
+    const double c_tot = c0 + c1;
 
     std::printf("==============================================================\n");
-    std::printf(" PIPELINE SUMMARY (kernel time only)\n");
-    std::printf("  [A] findMaxValue (orig)     %.3f ms\n", fm_ms);
-    std::printf("  [A] enhanceBrightness       %.3f ms\n", en_ms);
-    std::printf("  [A] TOTAL 2-kernel           %.3f ms  (best %.3f)\n", base_avg, base_best);
-    std::printf("  [B] findMaxAndEnhance fused %.3f ms  (best %.3f)\n", fu_ms, fu_best);
-    std::printf("  speedup [A]/[B]:            %.2fx\n", base_avg / std::max(fu_ms, 1e-9));
+    std::printf(" PIPELINE SUMMARY (ms)\n");
+    std::printf("  [A] baseline findmax+enhance  %.3f + %.3f = %.3f\n", a0, a1, a_tot);
+    std::printf("  [B] fused 1-kernel (1 WG)     %.3f\n", b_avg);
+    std::printf("  [C] opt findmax+enhance       %.3f + %.3f = %.3f\n", c0, c1, c_tot);
+    std::printf("  A/B=%.2fx  A/C=%.2fx  ( >1 means faster than baseline )\n",
+                a_tot / std::max(b_avg, 1e-9), a_tot / std::max(c_tot, 1e-9));
     std::printf("==============================================================\n");
 
     clReleaseMemObject(buf_src);
     clReleaseMemObject(buf_gold);
     clReleaseMemObject(buf_max);
-    clReleaseMemObject(buf_sync);
     clReleaseKernel(kn_fm);
     clReleaseKernel(kn_en);
     clReleaseKernel(kn_fu);
-    clReleaseProgram(prog_fm);
-    clReleaseProgram(prog_en);
-    clReleaseProgram(prog_fu);
+    clReleaseKernel(kn_fmo);
+    clReleaseKernel(kn_eno);
+    clReleaseProgram(p_fm);
+    clReleaseProgram(p_en);
+    clReleaseProgram(p_fu);
+    clReleaseProgram(p_fmo);
+    clReleaseProgram(p_eno);
     clReleaseCommandQueue(queue);
     clReleaseContext(ctx);
     return 0;

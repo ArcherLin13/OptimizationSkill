@@ -16,7 +16,9 @@ $Exe = Join-Path $Root "build\ohos-ocl-test\ocl_test_enhance"
 $Kernels = @(
     (Join-Path $Root "findmax_orig_2d.cl"),
     (Join-Path $Root "enhance_brightness.cl"),
-    (Join-Path $Root "findmax_enhance_fused.cl")
+    (Join-Path $Root "findmax_enhance_fused.cl"),
+    (Join-Path $Root "findmax_opt.cl"),
+    (Join-Path $Root "enhance_brightness_opt.cl")
 )
 
 if ([string]::IsNullOrWhiteSpace($OhosNative)) {
@@ -40,7 +42,7 @@ if ($targets -match "Empty") {
 
 Write-Host "============================================================"
 Write-Host " RUN: ocl_test_enhance  (findMax + enhanceBrightness pipeline)"
-Write-Host " NOT ocl_test_findmax   (that one is findmax-only)"
+Write-Host " A=baseline 2k  B=fused 1WG  C=opt 2k"
 Write-Host "============================================================"
 
 & $Hdc shell "mkdir -p $RemoteDir"
@@ -49,6 +51,6 @@ foreach ($k in $Kernels) {
     & $Hdc file send $k "$RemoteDir/$(Split-Path $k -Leaf)"
 }
 
-$cmd = "cd $RemoteDir && chmod +x ocl_test_enhance && ./ocl_test_enhance --findmax findmax_orig_2d.cl --enhance enhance_brightness.cl --fused findmax_enhance_fused.cl --width $Width --height $Height --runs $Runs --lwsx $LwsX --lwsy $LwsY --lws-opt $LwsOpt --nwg $Nwg"
+$cmd = "cd $RemoteDir && chmod +x ocl_test_enhance && ./ocl_test_enhance --findmax findmax_orig_2d.cl --enhance enhance_brightness.cl --fused findmax_enhance_fused.cl --findmax-opt findmax_opt.cl --enhance-opt enhance_brightness_opt.cl --width $Width --height $Height --runs $Runs --lwsx $LwsX --lwsy $LwsY --lws-opt $LwsOpt --nwg $Nwg"
 Write-Host $cmd
 & $Hdc shell $cmd

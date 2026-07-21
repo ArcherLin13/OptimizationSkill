@@ -39,6 +39,7 @@ CL_DYN(cl_int) (*clEnqueueReadBuffer_dyn)(cl_command_queue, cl_mem, cl_bool, siz
 CL_DYN(cl_int) (*clFinish_dyn)(cl_command_queue);
 CL_DYN(cl_int) (*clWaitForEvents_dyn)(cl_uint, const cl_event*);
 CL_DYN(cl_int) (*clGetEventProfilingInfo_dyn)(cl_event, cl_profiling_info, size_t, void*, size_t*);
+CL_DYN(cl_int) (*clGetEventInfo_dyn)(cl_event, cl_event_info, size_t, void*, size_t*);
 CL_DYN(cl_int) (*clReleaseMemObject_dyn)(cl_mem);
 CL_DYN(cl_int) (*clReleaseKernel_dyn)(cl_kernel);
 CL_DYN(cl_int) (*clReleaseProgram_dyn)(cl_program);
@@ -87,6 +88,7 @@ bool opencl_load() {
     LOAD(clFinish);
     LOAD(clWaitForEvents);
     LOAD(clGetEventProfilingInfo);
+    LOAD(clGetEventInfo);
     LOAD(clReleaseMemObject);
     LOAD(clReleaseKernel);
     LOAD(clReleaseProgram);
