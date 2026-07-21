@@ -238,11 +238,27 @@ cl_program buildProgram(cl_context ctx, cl_device_id device, const std::string& 
     return prog;
 }
 
-void set4(cl_kernel kn, cl_mem src, unsigned w, unsigned h, cl_mem mx) {
+void setFindMax(cl_kernel kn, cl_mem src, unsigned w, unsigned h, cl_mem mx) {
     OCL_CHECK(clSetKernelArg(kn, 0, sizeof(cl_mem), &src), "a0");
     OCL_CHECK(clSetKernelArg(kn, 1, sizeof(unsigned), &w), "a1");
     OCL_CHECK(clSetKernelArg(kn, 2, sizeof(unsigned), &h), "a2");
     OCL_CHECK(clSetKernelArg(kn, 3, sizeof(cl_mem), &mx), "a3");
+}
+
+// enhanceBrightness takes float max_value by value (not a buffer pointer).
+void setEnhance(cl_kernel kn, cl_mem src, unsigned w, unsigned h, float max_value) {
+    OCL_CHECK(clSetKernelArg(kn, 0, sizeof(cl_mem), &src), "a0");
+    OCL_CHECK(clSetKernelArg(kn, 1, sizeof(unsigned), &w), "a1");
+    OCL_CHECK(clSetKernelArg(kn, 2, sizeof(unsigned), &h), "a2");
+    OCL_CHECK(clSetKernelArg(kn, 3, sizeof(float), &max_value), "a3");
+}
+
+float readMaxFloat(cl_command_queue queue, cl_mem buf_max) {
+    uint32_t max_bits = 0;
+    OCL_CHECK(clEnqueueReadBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &max_bits, 0,
+                                  nullptr, nullptr),
+              "read max");
+    return halfToFloat(static_cast<uint16_t>(max_bits & 0xffffu));
 }
 
 }  // namespace
@@ -349,8 +365,7 @@ int main(int argc, char** argv) {
         }
         const unsigned wu_s = static_cast<unsigned>(s.w);
         const unsigned hu_s = static_cast<unsigned>(s.h);
-        set4(kn_fmo, bsrc, wu_s, hu_s, buf_max);
-        set4(kn_eno, bsrc, wu_s, hu_s, buf_max);
+        setFindMax(kn_fmo, bsrc, wu_s, hu_s, buf_max);
         uint32_t init = floatToHalf(-65504.0f);
         OCL_CHECK(clEnqueueWriteBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &init, 0,
                                        nullptr, nullptr),
@@ -371,6 +386,8 @@ int main(int argc, char** argv) {
             clReleaseMemObject(bsrc);
             continue;
         }
+        const float gpu_max = readMaxFloat(queue, buf_max);
+        setEnhance(kn_eno, bsrc, wu_s, hu_s, gpu_max);
         err = clEnqueueNDRangeKernel(queue, kn_eno, 1, nullptr, &gws_o, &lws_o, 0, nullptr, &e1);
         if (err != CL_SUCCESS) {
             std::printf("  %4dx%-4d enhance ENQUEUE fail %d [%s]\n", s.w, s.h, err, s.note);
@@ -386,11 +403,6 @@ int main(int argc, char** argv) {
             clReleaseMemObject(bsrc);
             continue;
         }
-        uint32_t max_bits = 0;
-        OCL_CHECK(clEnqueueReadBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &max_bits, 0,
-                                      nullptr, nullptr),
-                  "sweep read max");
-        const float gpu_max = halfToFloat(static_cast<uint16_t>(max_bits & 0xffffu));
         std::vector<uint16_t> out(img.size());
         OCL_CHECK(clEnqueueReadBuffer(queue, bsrc, CL_TRUE, 0, nbytes, out.data(), 0, nullptr,
                                       nullptr),
@@ -430,11 +442,10 @@ int main(int argc, char** argv) {
     OCL_CHECK(err, "buf_gold");
 
     const unsigned wu = (unsigned)W, hu = (unsigned)H;
-    set4(kn_fm, buf_src, wu, hu, buf_max);
-    set4(kn_en, buf_src, wu, hu, buf_max);
-    set4(kn_fu, buf_src, wu, hu, buf_max);
-    set4(kn_fmo, buf_src, wu, hu, buf_max);
-    set4(kn_eno, buf_src, wu, hu, buf_max);
+    setFindMax(kn_fm, buf_src, wu, hu, buf_max);
+    setFindMax(kn_fu, buf_src, wu, hu, buf_max);
+    setFindMax(kn_fmo, buf_src, wu, hu, buf_max);
+    // kn_en / kn_eno: float max_value set per-launch after findmax (see setEnhance)
 
     size_t gws2[2] = {((size_t)W + args.lwsx - 1) / args.lwsx * args.lwsx,
                       ((size_t)H + args.lwsy - 1) / args.lwsy * args.lwsy};
@@ -512,6 +523,8 @@ int main(int argc, char** argv) {
         OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fm, 2, nullptr, gws2, lws2, 0, nullptr, &e0), "A0");
         OCL_CHECK(clWaitForEvents(1, &e0), "A0w");
         clReleaseEvent(e0);
+        const float mv = readMaxFloat(queue, buf_max);
+        setEnhance(kn_en, buf_src, wu, hu, mv);
         OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_en, 2, nullptr, gws2, lws2, 0, nullptr, &e1), "A1");
         OCL_CHECK(clWaitForEvents(1, &e1), "A1w");
         clReleaseEvent(e1);
@@ -537,6 +550,8 @@ int main(int argc, char** argv) {
                   "C0");
         OCL_CHECK(clWaitForEvents(1, &e0), "C0w");
         clReleaseEvent(e0);
+        const float mv = readMaxFloat(queue, buf_max);
+        setEnhance(kn_eno, buf_src, wu, hu, mv);
         OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_eno, 1, nullptr, &gws_o, &lws_o, 0, nullptr, &e1),
                   "C1");
         OCL_CHECK(clWaitForEvents(1, &e1), "C1w");
@@ -555,6 +570,8 @@ int main(int argc, char** argv) {
             OCL_CHECK(clEnqueueNDRangeKernel(queue, k0, dim0, nullptr, g0, l0, 0, nullptr, &e0), "w0");
             OCL_CHECK(clWaitForEvents(1, &e0), "ww0");
             clReleaseEvent(e0);
+            const float mv = readMaxFloat(queue, buf_max);
+            setEnhance(k1, buf_src, wu, hu, mv);
             OCL_CHECK(clEnqueueNDRangeKernel(queue, k1, dim1, nullptr, g1, l1, 0, nullptr, &e1), "w1");
             OCL_CHECK(clWaitForEvents(1, &e1), "ww1");
             clReleaseEvent(e1);
@@ -568,6 +585,8 @@ int main(int argc, char** argv) {
             OCL_CHECK(clEnqueueNDRangeKernel(queue, k0, dim0, nullptr, g0, l0, 0, nullptr, &e0), "t0");
             const double m0 = profileMs(e0);
             clReleaseEvent(e0);
+            const float mv = readMaxFloat(queue, buf_max);
+            setEnhance(k1, buf_src, wu, hu, mv);
             OCL_CHECK(clEnqueueNDRangeKernel(queue, k1, dim1, nullptr, g1, l1, 0, nullptr, &e1), "t1");
             const double m1 = profileMs(e1);
             clReleaseEvent(e1);
