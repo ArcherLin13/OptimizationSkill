@@ -334,10 +334,11 @@ int main(int argc, char** argv) {
 
     std::printf("=== findMaxValue ===\n");
     std::printf("device: %s\n", deviceName(device).c_str());
-    std::printf("\nNOTE: opt uses FIXED gws=%zu (=lws %zu * nwg %d), NOT width*height.\n", gws_opt,
-                lws_opt, args.nwg);
-    std::printf("      Each WI does: for (i = gid; i < n; i += gws)  // grid-stride\n");
-    std::printf("      So any image size is OK (n << gws or n >> gws).\n\n");
+    std::printf("\n############################################################\n");
+    std::printf("# SIZE SWEEP: fixed gws=%zu (lws %zu * nwg %d), NOT WxH\n", gws_opt, lws_opt,
+                args.nwg);
+    std::printf("# grid-stride: for (i=gid; i<n; i+=gws)  — any image size OK\n");
+    std::printf("############################################################\n\n");
 
     const struct {
         int w, h;

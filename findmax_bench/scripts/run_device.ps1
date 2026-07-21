@@ -8,7 +8,8 @@ param(
     [int]$LwsY = 16,
     [int]$Lws1d = 256,
     [int]$LwsOpt = 256,
-    [int]$Nwg = 256
+    [int]$Nwg = 256,
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +20,12 @@ $Kernels = @(
     (Join-Path $Root "findmax_baseline.cl"),
     (Join-Path $Root "findmax_opt.cl")
 )
+
+if (-not $SkipBuild) {
+    Write-Host "Building (to pick up size sweep) ..."
+    & (Join-Path $PSScriptRoot "build_ohos.ps1")
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 
 if ([string]::IsNullOrWhiteSpace($OhosNative)) {
     $OhosNative = "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"
@@ -41,8 +48,10 @@ if ($targets -match "Empty") {
 
 Write-Host "============================================================"
 Write-Host " RUN: ocl_test_findmax  (findMax ONLY — no enhance)"
+Write-Host " Expect FIRST: --- opt size sweep --- then timed bench"
 Write-Host " For pipeline: .\scripts\run_enhance.ps1"
 Write-Host "============================================================"
+Write-Host "Local exe: $Exe  ($((Get-Item $Exe).LastWriteTime))"
 
 & $Hdc shell "mkdir -p $RemoteDir"
 & $Hdc file send $Exe "$RemoteDir/ocl_test_findmax"
