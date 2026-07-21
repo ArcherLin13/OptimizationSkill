@@ -1,15 +1,17 @@
 // Standalone enhanceBrightness microbench (no findmax).
-// Goal: see if we can beat current 1d half4 (bandwidth-bound scale).
 //
 // Cases:
-//   1d_h4     - current opt (max_value float, half4, float convert)
-//   1d_h8_inv - half8 * half(inv)
-//   1d_h16_inv- half16 * half(inv)
-//   + nwg sweep on best candidate
+//   2d_1px     - baseline 2D 1px/WI
+//   2d_v4      - 2D + vload4 along X
+//   1d_h4      - 1D grid-stride half4 (current opt)
+//   1d_h8_inv  - half8 * half(inv)
+//   1d_h16_inv - half16 * half(inv)
+//   + nwg sweep on best 1D candidate
 //
 // Usage:
 //   ./ocl_test_enhance_only [--width W] [--height H] [--runs 30]
-//                           [--lws-opt 256] [--nwg 256] [--max 0.25]
+//                           [--lwsx 16] [--lwsy 16] [--lws-opt 256] [--nwg 256]
+//                           [--max 0.25]
 
 #include <CL/cl.h>
 #ifdef OCR_OPENCL_DLOPEN
@@ -38,6 +40,8 @@ namespace {
     } while (0)
 
 struct Args {
+    std::string path_2d = "enhance_brightness.cl";
+    std::string path_2dv4 = "enhance_brightness_2d_v4.cl";
     std::string path_h4 = "enhance_brightness_opt.cl";
     std::string path_h8 = "enhance_brightness_opt_h8.cl";
     std::string path_h16 = "enhance_brightness_opt_h16.cl";
@@ -45,6 +49,8 @@ struct Args {
     int height = 4320;
     int runs = 30;
     int warmup = 5;
+    int lwsx = 16;
+    int lwsy = 16;
     int lws_opt = 256;
     int nwg = 256;
     float max_value = 0.25f;
@@ -60,7 +66,8 @@ Args parseArgs(int argc, char** argv) {
             }
             return false;
         };
-        if (take("--h4", a.path_h4) || take("--h8", a.path_h8) || take("--h16", a.path_h16)) {
+        if (take("--2d", a.path_2d) || take("--2dv4", a.path_2dv4) || take("--h4", a.path_h4) ||
+            take("--h8", a.path_h8) || take("--h16", a.path_h16)) {
             continue;
         }
         if (std::strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
@@ -71,6 +78,10 @@ Args parseArgs(int argc, char** argv) {
             a.runs = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
             a.warmup = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--lwsx") == 0 && i + 1 < argc) {
+            a.lwsx = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--lwsy") == 0 && i + 1 < argc) {
+            a.lwsy = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--lws-opt") == 0 && i + 1 < argc) {
             a.lws_opt = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--nwg") == 0 && i + 1 < argc) {
@@ -79,7 +90,7 @@ Args parseArgs(int argc, char** argv) {
             a.max_value = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
             std::printf("Usage: %s [--width W] [--height H] [--max 0.25] [--runs N]\n"
-                        "          [--lws-opt 256] [--nwg 256]\n",
+                        "          [--lwsx 16] [--lwsy 16] [--lws-opt 256] [--nwg 256]\n",
                         argv[0]);
             std::exit(0);
         }
@@ -230,9 +241,11 @@ void setArgs(cl_kernel kn, cl_mem src, unsigned w, unsigned h, float arg3) {
 struct Case {
     const char* name = nullptr;
     cl_kernel kn = nullptr;
-    size_t gws = 0;
-    size_t lws = 0;
+    int dim = 1;
+    size_t gws[2] = {0, 0};
+    size_t lws[2] = {0, 0};
     float arg3 = 0.f;  // max_value or inv
+    bool is_1d = true;
 };
 
 }  // namespace
@@ -284,34 +297,73 @@ int main(int argc, char** argv) {
     char opts[128];
     std::snprintf(opts, sizeof(opts), "-cl-std=CL1.2 -DLSIZE=%d", args.lws_opt);
 
+    cl_program p2d = buildProgram(ctx, device, args.path_2d, "-cl-std=CL1.2");
+    cl_program p2v = buildProgram(ctx, device, args.path_2dv4, "-cl-std=CL1.2");
     cl_program p4 = buildProgram(ctx, device, args.path_h4, opts);
     cl_program p8 = buildProgram(ctx, device, args.path_h8, opts);
     cl_program p16 = buildProgram(ctx, device, args.path_h16, opts);
 
-    const size_t lws = static_cast<size_t>(args.lws_opt);
-    const size_t gws = lws * static_cast<size_t>(args.nwg);
+    constexpr int kN = 5;
+    Case cases[kN];
 
-    Case cases[3];
-    cases[0].name = "1d_h4";
-    cases[0].kn = clCreateKernel(p4, "enhanceBrightness", &err);
+    cases[0].name = "2d_1px";
+    cases[0].kn = clCreateKernel(p2d, "enhanceBrightness", &err);
+    OCL_CHECK(err, "2d");
+    cases[0].dim = 2;
+    cases[0].is_1d = false;
+    cases[0].lws[0] = static_cast<size_t>(args.lwsx);
+    cases[0].lws[1] = static_cast<size_t>(args.lwsy);
+    cases[0].gws[0] = ((static_cast<size_t>(W) + cases[0].lws[0] - 1) / cases[0].lws[0]) *
+                       cases[0].lws[0];
+    cases[0].gws[1] = ((static_cast<size_t>(H) + cases[0].lws[1] - 1) / cases[0].lws[1]) *
+                       cases[0].lws[1];
+    cases[0].arg3 = mv;
+
+    cases[1].name = "2d_v4";
+    cases[1].kn = clCreateKernel(p2v, "enhanceBrightness", &err);
+    OCL_CHECK(err, "2dv4");
+    cases[1].dim = 2;
+    cases[1].is_1d = false;
+    cases[1].lws[0] = static_cast<size_t>(args.lwsx);
+    cases[1].lws[1] = static_cast<size_t>(args.lwsy);
+    {
+        const size_t groups_x = (static_cast<size_t>(W) + 3) / 4;
+        cases[1].gws[0] =
+            ((groups_x + cases[1].lws[0] - 1) / cases[1].lws[0]) * cases[1].lws[0];
+        cases[1].gws[1] = ((static_cast<size_t>(H) + cases[1].lws[1] - 1) / cases[1].lws[1]) *
+                           cases[1].lws[1];
+    }
+    cases[1].arg3 = mv;
+
+    const size_t lws1 = static_cast<size_t>(args.lws_opt);
+    const size_t gws1 = lws1 * static_cast<size_t>(args.nwg);
+
+    cases[2].name = "1d_h4";
+    cases[2].kn = clCreateKernel(p4, "enhanceBrightness", &err);
     OCL_CHECK(err, "h4");
-    cases[0].gws = gws;
-    cases[0].lws = lws;
-    cases[0].arg3 = mv;  // existing API: max_value
+    cases[2].dim = 1;
+    cases[2].is_1d = true;
+    cases[2].gws[0] = gws1;
+    cases[2].lws[0] = lws1;
+    cases[2].arg3 = mv;
 
-    cases[1].name = "1d_h8_inv";
-    cases[1].kn = clCreateKernel(p8, "enhanceBrightness", &err);
+    cases[3].name = "1d_h8_inv";
+    cases[3].kn = clCreateKernel(p8, "enhanceBrightness", &err);
     OCL_CHECK(err, "h8");
-    cases[1].gws = gws;
-    cases[1].lws = lws;
-    cases[1].arg3 = inv;
+    cases[3].dim = 1;
+    cases[3].is_1d = true;
+    cases[3].gws[0] = gws1;
+    cases[3].lws[0] = lws1;
+    cases[3].arg3 = inv;
 
-    cases[2].name = "1d_h16_inv";
-    cases[2].kn = clCreateKernel(p16, "enhanceBrightness", &err);
+    cases[4].name = "1d_h16_inv";
+    cases[4].kn = clCreateKernel(p16, "enhanceBrightness", &err);
     OCL_CHECK(err, "h16");
-    cases[2].gws = gws;
-    cases[2].lws = lws;
-    cases[2].arg3 = inv;
+    cases[4].dim = 1;
+    cases[4].is_1d = true;
+    cases[4].gws[0] = gws1;
+    cases[4].lws[0] = lws1;
+    cases[4].arg3 = inv;
 
     cl_mem buf_gold =
         clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes, host_in.data(), &err);
@@ -336,7 +388,7 @@ int main(int argc, char** argv) {
         setArgs(c.kn, buf_src, wu, hu, c.arg3);
         restore();
         cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, c.kn, 1, nullptr, &c.gws, &c.lws, 0, nullptr, &ev),
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, c.kn, c.dim, nullptr, c.gws, c.lws, 0, nullptr, &ev),
                   c.name);
         OCL_CHECK(clWaitForEvents(1, &ev), "wait");
         clReleaseEvent(ev);
@@ -345,7 +397,6 @@ int main(int argc, char** argv) {
                   "read");
         const float errm = maxAbsDiffHalf(out, host_ref);
         const float vs_in = maxAbsDiffHalf(out, host_in);
-        // half*half may be slightly looser than float path
         const bool ok = errm < 5e-2f && vs_in > 1e-3f;
         std::printf("[%s] vs_cpu=%.3e vs_in=%.3e %s\n", c.name, errm, vs_in, ok ? "OK" : "FAIL");
         if (!ok) {
@@ -359,7 +410,7 @@ int main(int argc, char** argv) {
             restore();
             cl_event ev = nullptr;
             OCL_CHECK(
-                clEnqueueNDRangeKernel(queue, c.kn, 1, nullptr, &c.gws, &c.lws, 0, nullptr, &ev),
+                clEnqueueNDRangeKernel(queue, c.kn, c.dim, nullptr, c.gws, c.lws, 0, nullptr, &ev),
                 "warm");
             OCL_CHECK(clWaitForEvents(1, &ev), "ww");
             clReleaseEvent(ev);
@@ -370,7 +421,7 @@ int main(int argc, char** argv) {
             OCL_CHECK(clFinish(queue), "fin");
             cl_event ev = nullptr;
             OCL_CHECK(
-                clEnqueueNDRangeKernel(queue, c.kn, 1, nullptr, &c.gws, &c.lws, 0, nullptr, &ev),
+                clEnqueueNDRangeKernel(queue, c.kn, c.dim, nullptr, c.gws, c.lws, 0, nullptr, &ev),
                 "t");
             const double ms = profileMs(ev);
             clReleaseEvent(ev);
@@ -380,32 +431,37 @@ int main(int argc, char** argv) {
         return {sum / args.runs, best};
     };
 
-    const double gb_rw = (2.0 * static_cast<double>(bytes)) / 1e9;  // read+write
+    const double gb_rw = (2.0 * static_cast<double>(bytes)) / 1e9;
 
     std::printf("############################################################\n");
-    std::printf("# enhance ONLY - push past half4?\n");
+    std::printf("# enhance ONLY: 2d_1px | 2d_v4 | 1d_h4 | 1d_h8 | 1d_h16\n");
     std::printf("# size=%dx%d  max=%.4f inv=%.4f  traffic=%.2f GB (R+W)\n", W, H, mv, inv, gb_rw);
-    std::printf("# If GB/s plateaus across impls => memory-bound, little left.\n");
     std::printf("############################################################\n");
     std::printf("device: %s\n", deviceName(device).c_str());
-    std::printf("launch: gws=%zu lws=%zu nwg=%d\n\n", gws, lws, args.nwg);
+    std::printf("2d_1px:  gws=(%zu,%zu) lws=(%zu,%zu)\n", cases[0].gws[0], cases[0].gws[1],
+                cases[0].lws[0], cases[0].lws[1]);
+    std::printf("2d_v4:   gws=(%zu,%zu) lws=(%zu,%zu)\n", cases[1].gws[0], cases[1].gws[1],
+                cases[1].lws[0], cases[1].lws[1]);
+    std::printf("1d_*:    gws=%zu lws=%zu nwg=%d\n\n", gws1, lws1, args.nwg);
 
     for (Case& c : cases) {
         check(c);
     }
 
-    double avgs[3], bests[3];
-    for (int i = 0; i < 3; ++i) {
+    double avgs[kN], bests[kN];
+    for (int i = 0; i < kN; ++i) {
         const auto r = bench(cases[i]);
         avgs[i] = r.first;
         bests[i] = r.second;
     }
 
     std::printf("\n--- results (avg %d) ---\n", args.runs);
-    std::printf("  %-12s %10s %10s %10s %10s\n", "impl", "avg_ms", "best_ms", "vs_h4", "GB/s");
+    std::printf("  %-12s %10s %10s %10s %10s\n", "impl", "avg_ms", "best_ms", "vs_2d_1px", "GB/s");
     double best_avg = avgs[0];
     int best_i = 0;
-    for (int i = 0; i < 3; ++i) {
+    int best_1d_i = 2;
+    double best_1d_avg = avgs[2];
+    for (int i = 0; i < kN; ++i) {
         const double gbs = gb_rw / (avgs[i] / 1e3);
         std::printf("  %-12s %10.3f %10.3f %9.2fx %10.1f\n", cases[i].name, avgs[i], bests[i],
                     avgs[0] / std::max(avgs[i], 1e-9), gbs);
@@ -413,17 +469,20 @@ int main(int argc, char** argv) {
             best_avg = avgs[i];
             best_i = i;
         }
+        if (cases[i].is_1d && avgs[i] < best_1d_avg) {
+            best_1d_avg = avgs[i];
+            best_1d_i = i;
+        }
     }
 
-    // nwg sweep on winner
     static const int kNwgs[] = {32, 64, 128, 256, 512, 1024};
-    std::printf("\n--- nwg sweep on %s (lws=%zu) ---\n", cases[best_i].name, lws);
+    std::printf("\n--- nwg sweep on %s (lws=%zu) ---\n", cases[best_1d_i].name, lws1);
     std::printf("  %6s %10s %10s\n", "nwg", "avg_ms", "GB/s");
     double sweep_best = 1e300;
     int sweep_nwg = args.nwg;
     for (int nwg : kNwgs) {
-        cases[best_i].gws = lws * static_cast<size_t>(nwg);
-        const auto [avg, best] = bench(cases[best_i]);
+        cases[best_1d_i].gws[0] = lws1 * static_cast<size_t>(nwg);
+        const auto [avg, best] = bench(cases[best_1d_i]);
         (void)best;
         const double gbs = gb_rw / (avg / 1e3);
         std::printf("  %6d %10.3f %10.1f\n", nwg, avg, gbs);
@@ -432,16 +491,17 @@ int main(int argc, char** argv) {
             sweep_nwg = nwg;
         }
     }
-    std::printf("\nbest: %s @ nwg=%d  avg=%.3f ms  (%.1f GB/s R+W)\n", cases[best_i].name, sweep_nwg,
-                sweep_best, gb_rw / (sweep_best / 1e3));
-    std::printf("note: if all ~same GB/s, kernel is memory-bound; next wins are skip-if-max>=1\n"
-                "      or fuse with a later consumer (avoid extra write).\n");
+    std::printf("\noverall best: %s  avg=%.3f ms\n", cases[best_i].name, best_avg);
+    std::printf("1d best: %s @ nwg=%d  avg=%.3f ms  (%.1f GB/s R+W)\n", cases[best_1d_i].name,
+                sweep_nwg, sweep_best, gb_rw / (sweep_best / 1e3));
 
     clReleaseMemObject(buf_src);
     clReleaseMemObject(buf_gold);
     for (Case& c : cases) {
         clReleaseKernel(c.kn);
     }
+    clReleaseProgram(p2d);
+    clReleaseProgram(p2v);
     clReleaseProgram(p4);
     clReleaseProgram(p8);
     clReleaseProgram(p16);
