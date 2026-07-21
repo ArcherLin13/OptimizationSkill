@@ -1,26 +1,22 @@
 # findMaxValue OpenCL bench
 
-Compare **orig (2D)** vs **mine (1D)** on a `half` image (`5760×4320` default).
+Compare three kernels on `half` image (`5760×4320` default):
 
-Same logic for both:
+| impl | idea |
+|---|---|
+| `orig_2d_1px` | original 2D, 1 px/WI, local `float[256]` reduce, atomic/WG |
+| `base_1d_1px` | same algorithm, 1D launch |
+| `opt_stride` | **OCR-softmax style**: grid-stride multi-px/WI + `half4` + local reduce; only `nwg` atomics |
 
-1. Each WI loads one pixel
-2. Workgroup local reduction → local max
-3. `lid==0` atomically updates global max
+`opt` launch: `gws = lws_opt * nwg` (default 256×256), **not** `width*height`.
 
-| | orig | mine |
-|---|---|---|
-| NDRange | 2D (`lws` 16×16) | 1D (`lws` 256) |
-| local mem | `float s_max[256]` | `half lmax[256]` |
-
-Orig matches the original structure; only crash hazards removed (no early-return before `barrier`, OOB guard, `local_size<=256`).
-
-## Build / run (HarmonyOS)
+## Build / run
 
 ```powershell
 cd findmax_bench
 .\scripts\build_ohos.ps1
 .\scripts\run_device.ps1
+# tune occupancy if needed:
+.\scripts\run_device.ps1 -Nwg 128
+.\scripts\run_device.ps1 -Nwg 512 -LwsOpt 256
 ```
-
-Reports **kernel-only** time for both, plus `orig/mine` speedup.

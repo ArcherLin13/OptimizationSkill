@@ -1,11 +1,10 @@
-// HarmonyOS OpenCL: compare orig(2D) vs mine(1D) findMaxValue.
-// Same logic: 1 px/WI -> workgroup reduce -> atomic global max.
-// Default image 5760x4320.
+// HarmonyOS OpenCL: findMaxValue — orig(2D 1px) vs baseline(1D 1px) vs opt(OCR-style).
+// Default image 5760x4320. Kernel time only.
 //
 // Usage:
 //   ./ocl_test_findmax [--width 5760] [--height 4320] [--runs 30]
-//                       [--orig findmax_orig_2d.cl] [--mine findmax_baseline.cl]
 //                       [--lwsx 16] [--lwsy 16] [--lws1d 256]
+//                       [--lws-opt 256] [--nwg 256]
 
 #include <CL/cl.h>
 #ifdef OCR_OPENCL_DLOPEN
@@ -36,6 +35,7 @@ namespace {
 struct Args {
     std::string orig_path = "findmax_orig_2d.cl";
     std::string mine_path = "findmax_baseline.cl";
+    std::string opt_path = "findmax_opt.cl";
     int width = 5760;
     int height = 4320;
     int runs = 30;
@@ -43,6 +43,8 @@ struct Args {
     int lwsx = 16;
     int lwsy = 16;
     int lws1d = 256;
+    int lws_opt = 256;
+    int nwg = 256;  // workgroups for opt (gws = lws_opt * nwg)
 };
 
 Args parseArgs(int argc, char** argv) {
@@ -52,6 +54,8 @@ Args parseArgs(int argc, char** argv) {
             a.orig_path = argv[++i];
         } else if (std::strcmp(argv[i], "--mine") == 0 && i + 1 < argc) {
             a.mine_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--opt") == 0 && i + 1 < argc) {
+            a.opt_path = argv[++i];
         } else if (std::strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
             a.width = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
@@ -66,10 +70,15 @@ Args parseArgs(int argc, char** argv) {
             a.lwsy = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--lws1d") == 0 && i + 1 < argc) {
             a.lws1d = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--lws-opt") == 0 && i + 1 < argc) {
+            a.lws_opt = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--nwg") == 0 && i + 1 < argc) {
+            a.nwg = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
             std::printf(
-                "Usage: %s [--orig PATH] [--mine PATH] [--width W] [--height H]\n"
-                "          [--lwsx 16] [--lwsy 16] [--lws1d 256] [--runs N]\n",
+                "Usage: %s [--orig|--mine|--opt PATH] [--width W] [--height H]\n"
+                "          [--lwsx 16] [--lwsy 16] [--lws1d 256]\n"
+                "          [--lws-opt 256] [--nwg 256] [--runs N]\n",
                 argv[0]);
             std::exit(0);
         }
@@ -121,8 +130,7 @@ uint16_t floatToHalf(float f) {
             return static_cast<uint16_t>(sign);
         }
         mant |= 0x800000u;
-        const uint32_t t = mant >> (1 - exp + 13);
-        return static_cast<uint16_t>(sign | t);
+        return static_cast<uint16_t>(sign | (mant >> (1 - exp + 13)));
     }
     if (exp >= 31) {
         return static_cast<uint16_t>(sign | 0x7c00u);
@@ -214,7 +222,6 @@ void enqueue(cl_command_queue queue, const KernelCase& c, cl_event* ev) {
 }
 
 struct BenchResult {
-    float gpu_max = 0.f;
     double avg_ms = 0.0;
     double best_ms = 0.0;
 };
@@ -241,7 +248,7 @@ BenchResult runCase(cl_command_queue queue, cl_mem buf_max, KernelCase& c, float
               "read max");
     const float got = halfToFloat(static_cast<uint16_t>(got_bits & 0xffffu));
     const float abs_err = std::fabs(got - ref_max);
-    std::printf("[%s] ref_max=%.6f gpu_max=%.6f abs_err=%.3e %s\n", c.name, ref_max, got, abs_err,
+    std::printf("[%s] ref=%.6f gpu=%.6f err=%.3e %s\n", c.name, ref_max, got, abs_err,
                 abs_err < 1e-2f ? "OK" : "FAIL");
     if (abs_err >= 1e-2f) {
         std::exit(1);
@@ -266,12 +273,7 @@ BenchResult runCase(cl_command_queue queue, cl_mem buf_max, KernelCase& c, float
         sum += ms;
         best = std::min(best, ms);
     }
-
-    BenchResult r;
-    r.gpu_max = got;
-    r.avg_ms = sum / runs;
-    r.best_ms = best;
-    return r;
+    return BenchResult{sum / runs, best};
 }
 
 }  // namespace
@@ -279,11 +281,15 @@ BenchResult runCase(cl_command_queue queue, cl_mem buf_max, KernelCase& c, float
 int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
     if (args.lwsx * args.lwsy > 256) {
-        std::fprintf(stderr, "orig requires lwsx*lwsy <= 256 (got %d)\n", args.lwsx * args.lwsy);
+        std::fprintf(stderr, "orig requires lwsx*lwsy <= 256\n");
         return 1;
     }
-    if (args.lws1d <= 0 || (args.lws1d & (args.lws1d - 1)) != 0) {
-        std::fprintf(stderr, "--lws1d must be power-of-two\n");
+    if (args.lws_opt <= 0 || (args.lws_opt & (args.lws_opt - 1)) != 0) {
+        std::fprintf(stderr, "--lws-opt must be power-of-two\n");
+        return 1;
+    }
+    if (args.nwg <= 0) {
+        std::fprintf(stderr, "--nwg must be > 0\n");
         return 1;
     }
 
@@ -303,39 +309,38 @@ int main(int argc, char** argv) {
     fillHalfImage(host, W, H, ref_max);
 
     cl_uint np = 0;
-    OCL_CHECK(clGetPlatformIDs(0, nullptr, &np), "platforms count");
-    if (np == 0) {
-        std::fprintf(stderr, "No OpenCL platforms\n");
-        return 1;
-    }
+    OCL_CHECK(clGetPlatformIDs(0, nullptr, &np), "platforms");
     std::vector<cl_platform_id> platforms(np);
     OCL_CHECK(clGetPlatformIDs(np, platforms.data(), nullptr), "platforms");
     cl_device_id device = pickDevice(platforms[0]);
 
     cl_int err = CL_SUCCESS;
     cl_context ctx = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
-    OCL_CHECK(err, "clCreateContext");
+    OCL_CHECK(err, "ctx");
     cl_command_queue queue = clCreateCommandQueue(ctx, device, CL_QUEUE_PROFILING_ENABLE, &err);
-    OCL_CHECK(err, "clCreateCommandQueue");
+    OCL_CHECK(err, "queue");
 
-    char opts_mine[128];
-    std::snprintf(opts_mine, sizeof(opts_mine), "-cl-std=CL1.2 -DWG_SIZE=%d", args.lws1d);
+    char opts_1d[128], opts_opt[128];
+    std::snprintf(opts_1d, sizeof(opts_1d), "-cl-std=CL1.2 -DWG_SIZE=%d", args.lws1d);
+    std::snprintf(opts_opt, sizeof(opts_opt), "-cl-std=CL1.2 -DLSIZE=%d", args.lws_opt);
+
     cl_program prog_orig = buildProgram(ctx, device, args.orig_path, "-cl-std=CL1.2");
-    cl_program prog_mine = buildProgram(ctx, device, args.mine_path, opts_mine);
+    cl_program prog_mine = buildProgram(ctx, device, args.mine_path, opts_1d);
+    cl_program prog_opt = buildProgram(ctx, device, args.opt_path, opts_opt);
 
     cl_mem buf_src =
         clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes, host.data(), &err);
-    OCL_CHECK(err, "buf_src");
+    OCL_CHECK(err, "src");
     cl_mem buf_max = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
-    OCL_CHECK(err, "buf_max");
+    OCL_CHECK(err, "max");
 
     const unsigned int wu = static_cast<unsigned int>(W);
     const unsigned int hu = static_cast<unsigned int>(H);
 
     KernelCase orig;
-    orig.name = "orig_2d";
+    orig.name = "orig_2d_1px";
     orig.kn = clCreateKernel(prog_orig, "findMaxValue", &err);
-    OCL_CHECK(err, "kernel orig");
+    OCL_CHECK(err, "orig kn");
     orig.dim = 2;
     orig.lws[0] = static_cast<size_t>(args.lwsx);
     orig.lws[1] = static_cast<size_t>(args.lwsy);
@@ -344,41 +349,59 @@ int main(int argc, char** argv) {
     setCommonArgs(orig.kn, buf_src, wu, hu, buf_max);
 
     KernelCase mine;
-    mine.name = "mine_1d";
+    mine.name = "base_1d_1px";
     mine.kn = clCreateKernel(prog_mine, "findMaxValue", &err);
-    OCL_CHECK(err, "kernel mine");
+    OCL_CHECK(err, "mine kn");
     mine.dim = 1;
     mine.lws[0] = static_cast<size_t>(args.lws1d);
     mine.gws[0] = ((nPix + mine.lws[0] - 1) / mine.lws[0]) * mine.lws[0];
     setCommonArgs(mine.kn, buf_src, wu, hu, buf_max);
 
-    std::printf("=== findMaxValue: orig(2D) vs mine(1D), same logic ===\n");
+    KernelCase opt;
+    opt.name = "opt_stride";
+    opt.kn = clCreateKernel(prog_opt, "findMaxValue", &err);
+    OCL_CHECK(err, "opt kn");
+    opt.dim = 1;
+    opt.lws[0] = static_cast<size_t>(args.lws_opt);
+    opt.gws[0] = static_cast<size_t>(args.lws_opt) * static_cast<size_t>(args.nwg);
+    setCommonArgs(opt.kn, buf_src, wu, hu, buf_max);
+
+    const double elems_per_wi =
+        static_cast<double>(nPix) / static_cast<double>(opt.gws[0]);
+
+    std::printf("=== findMaxValue: orig vs base vs opt(OCR-style) ===\n");
     std::printf("device: %s\n", deviceName(device).c_str());
     std::printf("size:   %d x %d = %.2f MP\n", W, H, nPix / 1e6);
-    std::printf("orig:   %s  gws=(%zu,%zu) lws=(%zu,%zu) local_float[256]\n", args.orig_path.c_str(),
-                orig.gws[0], orig.gws[1], orig.lws[0], orig.lws[1]);
-    std::printf("mine:   %s  gws=%zu lws=%zu local_half[%d]\n\n", args.mine_path.c_str(),
-                mine.gws[0], mine.lws[0], args.lws1d);
+    std::printf("orig:   2D gws=(%zu,%zu) lws=(%zu,%zu)  ~1 px/WI, ~%zu atomics\n", orig.gws[0],
+                orig.gws[1], orig.lws[0], orig.lws[1],
+                (orig.gws[0] / orig.lws[0]) * (orig.gws[1] / orig.lws[1]));
+    std::printf("base:   1D gws=%zu lws=%zu  ~1 px/WI\n", mine.gws[0], mine.lws[0]);
+    std::printf("opt:    1D gws=%zu lws=%zu nwg=%d  ~%.1f px/WI, %d atomics, half4\n\n", opt.gws[0],
+                opt.lws[0], args.nwg, elems_per_wi, args.nwg);
 
     const BenchResult r_orig = runCase(queue, buf_max, orig, ref_max, args.warmup, args.runs);
     const BenchResult r_mine = runCase(queue, buf_max, mine, ref_max, args.warmup, args.runs);
+    const BenchResult r_opt = runCase(queue, buf_max, opt, ref_max, args.warmup, args.runs);
 
     const double gb = bytes / 1e9;
     std::printf("\n--- kernel time only (avg %d runs) ---\n", args.runs);
-    std::printf("  %-10s %10s %10s %12s\n", "impl", "avg_ms", "best_ms", "GB/s");
-    std::printf("  %-10s %10.3f %10.3f %12.2f\n", "orig_2d", r_orig.avg_ms, r_orig.best_ms,
-                gb / (r_orig.avg_ms / 1e3));
-    std::printf("  %-10s %10.3f %10.3f %12.2f\n", "mine_1d", r_mine.avg_ms, r_mine.best_ms,
-                gb / (r_mine.avg_ms / 1e3));
-    std::printf("  orig/mine: %.2fx ( >1 means mine faster )\n",
-                r_orig.avg_ms / std::max(r_mine.avg_ms, 1e-9));
+    std::printf("  %-14s %10s %10s %10s %12s\n", "impl", "avg_ms", "best_ms", "vs_orig", "GB/s");
+    auto row = [&](const char* name, const BenchResult& r) {
+        std::printf("  %-14s %10.3f %10.3f %9.2fx %12.2f\n", name, r.avg_ms, r.best_ms,
+                    r_orig.avg_ms / std::max(r.avg_ms, 1e-9), gb / (r.avg_ms / 1e3));
+    };
+    row("orig_2d_1px", r_orig);
+    row("base_1d_1px", r_mine);
+    row("opt_stride", r_opt);
 
     clReleaseMemObject(buf_src);
     clReleaseMemObject(buf_max);
     clReleaseKernel(orig.kn);
     clReleaseKernel(mine.kn);
+    clReleaseKernel(opt.kn);
     clReleaseProgram(prog_orig);
     clReleaseProgram(prog_mine);
+    clReleaseProgram(prog_opt);
     clReleaseCommandQueue(queue);
     clReleaseContext(ctx);
     return 0;

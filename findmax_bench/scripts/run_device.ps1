@@ -6,7 +6,9 @@ param(
     [int]$Runs = 30,
     [int]$LwsX = 16,
     [int]$LwsY = 16,
-    [int]$Lws1d = 256
+    [int]$Lws1d = 256,
+    [int]$LwsOpt = 256,
+    [int]$Nwg = 256
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,7 +16,8 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Exe = Join-Path $Root "build\ohos-ocl-test\ocl_test_findmax"
 $Kernels = @(
     (Join-Path $Root "findmax_orig_2d.cl"),
-    (Join-Path $Root "findmax_baseline.cl")
+    (Join-Path $Root "findmax_baseline.cl"),
+    (Join-Path $Root "findmax_opt.cl")
 )
 
 if ([string]::IsNullOrWhiteSpace($OhosNative)) {
@@ -42,6 +45,6 @@ foreach ($k in $Kernels) {
     & $Hdc file send $k "$RemoteDir/$(Split-Path $k -Leaf)"
 }
 
-$cmd = "cd $RemoteDir && chmod +x ocl_test_findmax && ./ocl_test_findmax --orig findmax_orig_2d.cl --mine findmax_baseline.cl --width $Width --height $Height --runs $Runs --lwsx $LwsX --lwsy $LwsY --lws1d $Lws1d"
+$cmd = "cd $RemoteDir && chmod +x ocl_test_findmax && ./ocl_test_findmax --orig findmax_orig_2d.cl --mine findmax_baseline.cl --opt findmax_opt.cl --width $Width --height $Height --runs $Runs --lwsx $LwsX --lwsy $LwsY --lws1d $Lws1d --lws-opt $LwsOpt --nwg $Nwg"
 Write-Host $cmd
 & $Hdc shell $cmd
