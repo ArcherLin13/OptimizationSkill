@@ -1,0 +1,3 @@
+D:/WorkStation/OptimizationSkill/findmax_bench/build/ohos-ocl-test/CMakeFiles/ocl_test_findmax.dir
+D:/WorkStation/OptimizationSkill/findmax_bench/build/ohos-ocl-test/CMakeFiles/edit_cache.dir
+D:/WorkStation/OptimizationSkill/findmax_bench/build/ohos-ocl-test/CMakeFiles/rebuild_cache.dir
