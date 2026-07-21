@@ -30,6 +30,8 @@ CL_DYN(cl_int) (*clSetKernelArg_dyn)(cl_kernel, cl_uint, size_t, const void*);
 CL_DYN(cl_mem) (*clCreateBuffer_dyn)(cl_context, cl_mem_flags, size_t, void*, cl_int*);
 CL_DYN(cl_int) (*clEnqueueWriteBuffer_dyn)(cl_command_queue, cl_mem, cl_bool, size_t, size_t, const void*, cl_uint,
                                            const cl_event*, cl_event*);
+CL_DYN(cl_int) (*clEnqueueCopyBuffer_dyn)(cl_command_queue, cl_mem, cl_mem, size_t, size_t, size_t, cl_uint,
+                                          const cl_event*, cl_event*);
 CL_DYN(cl_int) (*clEnqueueNDRangeKernel_dyn)(cl_command_queue, cl_kernel, cl_uint, const size_t*, const size_t*,
                                               const size_t*, cl_uint, const cl_event*, cl_event*);
 CL_DYN(cl_int) (*clEnqueueReadBuffer_dyn)(cl_command_queue, cl_mem, cl_bool, size_t, size_t, void*, cl_uint,
@@ -79,6 +81,7 @@ bool opencl_load() {
     LOAD(clSetKernelArg);
     LOAD(clCreateBuffer);
     LOAD(clEnqueueWriteBuffer);
+    LOAD(clEnqueueCopyBuffer);
     LOAD(clEnqueueNDRangeKernel);
     LOAD(clEnqueueReadBuffer);
     LOAD(clFinish);

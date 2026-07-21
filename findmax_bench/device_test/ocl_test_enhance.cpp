@@ -214,6 +214,10 @@ cl_program buildProgram(cl_context ctx, cl_device_id device, const std::string& 
 }  // namespace
 
 int main(int argc, char** argv) {
+    // hdc shell often fully-buffers stdout; force immediate flush so timing lines show up.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+
     const Args args = parseArgs(argc, argv);
     if (args.lwsx * args.lwsy > 256) {
         std::fprintf(stderr, "orig findmax requires lwsx*lwsy <= 256\n");
@@ -269,6 +273,9 @@ int main(int argc, char** argv) {
 
     cl_mem buf_src = clCreateBuffer(ctx, CL_MEM_READ_WRITE, bytes, nullptr, &err);
     OCL_CHECK(err, "buf_src");
+    cl_mem buf_gold = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes, host_src.data(),
+                                     &err);
+    OCL_CHECK(err, "buf_gold");
     cl_mem buf_max = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
     OCL_CHECK(err, "buf_max");
     cl_mem buf_sync = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_int) * 2, nullptr, &err);
@@ -299,10 +306,10 @@ int main(int argc, char** argv) {
     size_t gws1 = (size_t)args.lws_opt * (size_t)args.nwg;
     size_t lws1 = (size_t)args.lws_opt;
 
-    auto uploadSrc = [&] {
-        OCL_CHECK(clEnqueueWriteBuffer(queue, buf_src, CL_TRUE, 0, bytes, host_src.data(), 0, nullptr,
-                                       nullptr),
-                  "upload src");
+    auto restoreSrc = [&] {
+        OCL_CHECK(clEnqueueCopyBuffer(queue, buf_gold, buf_src, 0, 0, bytes, 0, nullptr, nullptr),
+                  "restore src");
+        OCL_CHECK(clFinish(queue), "restore finish");
     };
     auto resetMax = [&] {
         uint32_t init = floatToHalf(-65504.0f);
@@ -349,7 +356,7 @@ int main(int argc, char** argv) {
 
     // Correctness
     std::printf("--- correctness (full image after enhance vs CPU) ---\n");
-    uploadSrc();
+    restoreSrc();
     resetMax();
     {
         cl_event e0 = nullptr, e1 = nullptr;
@@ -364,7 +371,7 @@ int main(int argc, char** argv) {
     }
     checkOut("A_baseline findmax+enhance");
 
-    uploadSrc();
+    restoreSrc();
     resetMax();
     resetSync();
     {
@@ -375,86 +382,88 @@ int main(int argc, char** argv) {
         clReleaseEvent(e);
     }
     checkOut("B_fused    findMaxAndEnhance");
-    std::printf("\n");
+    std::printf("correctness done. starting TIMING...\n\n");
 
-    auto benchBaseline = [&](int warmup, int runs) {
-        for (int i = 0; i < warmup; ++i) {
-            uploadSrc();
-            resetMax();
-            cl_event e0 = nullptr, e1 = nullptr;
-            OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fm, 2, nullptr, gws2, lws2, 0, nullptr, &e0),
-                      "fm w");
-            OCL_CHECK(clWaitForEvents(1, &e0), "w0");
-            clReleaseEvent(e0);
-            OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_en, 2, nullptr, gws2, lws2, 0, nullptr, &e1),
-                      "en w");
-            OCL_CHECK(clWaitForEvents(1, &e1), "w1");
-            clReleaseEvent(e1);
+    // ----- TIMING A -----
+    std::printf(">>> TIMING [A] baseline 2-kernel (%d warmup + %d runs)...\n", args.warmup, args.runs);
+    for (int i = 0; i < args.warmup; ++i) {
+        restoreSrc();
+        resetMax();
+        cl_event e0 = nullptr, e1 = nullptr;
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fm, 2, nullptr, gws2, lws2, 0, nullptr, &e0), "fm w");
+        OCL_CHECK(clWaitForEvents(1, &e0), "w0");
+        clReleaseEvent(e0);
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_en, 2, nullptr, gws2, lws2, 0, nullptr, &e1), "en w");
+        OCL_CHECK(clWaitForEvents(1, &e1), "w1");
+        clReleaseEvent(e1);
+    }
+    double sum_fm = 0, sum_en = 0, base_best = 1e300;
+    for (int i = 0; i < args.runs; ++i) {
+        restoreSrc();
+        resetMax();
+        OCL_CHECK(clFinish(queue), "fin A");
+        cl_event e0 = nullptr, e1 = nullptr;
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fm, 2, nullptr, gws2, lws2, 0, nullptr, &e0), "fm");
+        const double ms0 = profileMs(e0);
+        clReleaseEvent(e0);
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_en, 2, nullptr, gws2, lws2, 0, nullptr, &e1), "en");
+        const double ms1 = profileMs(e1);
+        clReleaseEvent(e1);
+        sum_fm += ms0;
+        sum_en += ms1;
+        base_best = std::min(base_best, ms0 + ms1);
+        if ((i + 1) == 1 || (i + 1) == args.runs || ((i + 1) % 10) == 0) {
+            std::printf("    [A] run %d/%d  findmax=%.3f ms  enhance=%.3f ms  sum=%.3f ms\n", i + 1,
+                        args.runs, ms0, ms1, ms0 + ms1);
         }
-        double sum_fm = 0, sum_en = 0, best = 1e300;
-        for (int i = 0; i < runs; ++i) {
-            uploadSrc();
-            resetMax();
-            OCL_CHECK(clFinish(queue), "fin");
-            cl_event e0 = nullptr, e1 = nullptr;
-            OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fm, 2, nullptr, gws2, lws2, 0, nullptr, &e0),
-                      "fm");
-            const double ms0 = profileMs(e0);
-            clReleaseEvent(e0);
-            OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_en, 2, nullptr, gws2, lws2, 0, nullptr, &e1),
-                      "en");
-            const double ms1 = profileMs(e1);
-            clReleaseEvent(e1);
-            sum_fm += ms0;
-            sum_en += ms1;
-            best = std::min(best, ms0 + ms1);
-        }
-        return std::tuple<double, double, double>{sum_fm / runs, sum_en / runs, best};
-    };
-
-    auto benchFused = [&](int warmup, int runs) {
-        for (int i = 0; i < warmup; ++i) {
-            uploadSrc();
-            resetMax();
-            resetSync();
-            cl_event e = nullptr;
-            OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fu, 1, nullptr, &gws1, &lws1, 0, nullptr, &e),
-                      "fu w");
-            OCL_CHECK(clWaitForEvents(1, &e), "fu ww");
-            clReleaseEvent(e);
-        }
-        double sum = 0, best = 1e300;
-        for (int i = 0; i < runs; ++i) {
-            uploadSrc();
-            resetMax();
-            resetSync();
-            OCL_CHECK(clFinish(queue), "fin");
-            cl_event e = nullptr;
-            OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fu, 1, nullptr, &gws1, &lws1, 0, nullptr, &e),
-                      "fu");
-            const double ms = profileMs(e);
-            clReleaseEvent(e);
-            sum += ms;
-            best = std::min(best, ms);
-        }
-        return std::pair<double, double>{sum / runs, best};
-    };
-
-    const auto [fm_ms, en_ms, base_best] = benchBaseline(args.warmup, args.runs);
-    const auto [fu_ms, fu_best] = benchFused(args.warmup, args.runs);
+    }
+    const double fm_ms = sum_fm / args.runs;
+    const double en_ms = sum_en / args.runs;
     const double base_avg = fm_ms + en_ms;
+    std::printf(">>> [A] DONE  findmax=%.3f  enhance=%.3f  TOTAL=%.3f ms (best %.3f)\n\n", fm_ms, en_ms,
+                base_avg, base_best);
 
-    std::printf("\n--- PIPELINE kernel time (avg %d runs) ---\n", args.runs);
+    // ----- TIMING B -----
+    std::printf(">>> TIMING [B] fused 1-kernel (%d warmup + %d runs)...\n", args.warmup, args.runs);
+    for (int i = 0; i < args.warmup; ++i) {
+        restoreSrc();
+        resetMax();
+        resetSync();
+        cl_event e = nullptr;
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fu, 1, nullptr, &gws1, &lws1, 0, nullptr, &e), "fu w");
+        OCL_CHECK(clWaitForEvents(1, &e), "fu ww");
+        clReleaseEvent(e);
+    }
+    double sum_fu = 0, fu_best = 1e300;
+    for (int i = 0; i < args.runs; ++i) {
+        restoreSrc();
+        resetMax();
+        resetSync();
+        OCL_CHECK(clFinish(queue), "fin B");
+        cl_event e = nullptr;
+        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fu, 1, nullptr, &gws1, &lws1, 0, nullptr, &e), "fu");
+        const double ms = profileMs(e);
+        clReleaseEvent(e);
+        sum_fu += ms;
+        fu_best = std::min(fu_best, ms);
+        if ((i + 1) == 1 || (i + 1) == args.runs || ((i + 1) % 10) == 0) {
+            std::printf("    [B] run %d/%d  fused=%.3f ms\n", i + 1, args.runs, ms);
+        }
+    }
+    const double fu_ms = sum_fu / args.runs;
+    std::printf(">>> [B] DONE  fused=%.3f ms (best %.3f)\n\n", fu_ms, fu_best);
+
+    std::printf("==============================================================\n");
+    std::printf(" PIPELINE SUMMARY (kernel time only)\n");
     std::printf("  [A] findMaxValue (orig)     %.3f ms\n", fm_ms);
     std::printf("  [A] enhanceBrightness       %.3f ms\n", en_ms);
     std::printf("  [A] TOTAL 2-kernel           %.3f ms  (best %.3f)\n", base_avg, base_best);
     std::printf("  [B] findMaxAndEnhance fused %.3f ms  (best %.3f)\n", fu_ms, fu_best);
     std::printf("  speedup [A]/[B]:            %.2fx\n", base_avg / std::max(fu_ms, 1e-9));
-    std::printf("##############################################################\n");
-    std::printf("# end PIPELINE bench (findmax + enhance)\n");
-    std::printf("##############################################################\n");
+    std::printf("==============================================================\n");
 
     clReleaseMemObject(buf_src);
+    clReleaseMemObject(buf_gold);
     clReleaseMemObject(buf_max);
     clReleaseMemObject(buf_sync);
     clReleaseKernel(kn_fm);

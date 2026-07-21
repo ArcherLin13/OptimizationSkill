@@ -32,6 +32,8 @@ extern CL_DYN(cl_int) (*clSetKernelArg_dyn)(cl_kernel, cl_uint, size_t, const vo
 extern CL_DYN(cl_mem) (*clCreateBuffer_dyn)(cl_context, cl_mem_flags, size_t, void*, cl_int*);
 extern CL_DYN(cl_int) (*clEnqueueWriteBuffer_dyn)(cl_command_queue, cl_mem, cl_bool, size_t, size_t, const void*,
                                                   cl_uint, const cl_event*, cl_event*);
+extern CL_DYN(cl_int) (*clEnqueueCopyBuffer_dyn)(cl_command_queue, cl_mem, cl_mem, size_t, size_t, size_t,
+                                                 cl_uint, const cl_event*, cl_event*);
 extern CL_DYN(cl_int) (*clEnqueueNDRangeKernel_dyn)(cl_command_queue, cl_kernel, cl_uint, const size_t*,
                                                     const size_t*, const size_t*, cl_uint, const cl_event*,
                                                     cl_event*);
@@ -59,6 +61,7 @@ extern CL_DYN(cl_int) (*clReleaseEvent_dyn)(cl_event);
 #define clSetKernelArg clSetKernelArg_dyn
 #define clCreateBuffer clCreateBuffer_dyn
 #define clEnqueueWriteBuffer clEnqueueWriteBuffer_dyn
+#define clEnqueueCopyBuffer clEnqueueCopyBuffer_dyn
 #define clEnqueueNDRangeKernel clEnqueueNDRangeKernel_dyn
 #define clEnqueueReadBuffer clEnqueueReadBuffer_dyn
 #define clFinish clFinish_dyn
