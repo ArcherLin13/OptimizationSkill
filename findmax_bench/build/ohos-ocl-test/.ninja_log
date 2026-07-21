@@ -1,4 +1,0 @@
-# ninja log v6
-11	208	8063199614440094	CMakeFiles/ocl_test_findmax.dir/device_test/opencl_dynload.cpp.o	bcd5356bfa1b59dc
-6	1486	8063199614440094	CMakeFiles/ocl_test_findmax.dir/device_test/ocl_test_findmax.cpp.o	662b8b1de9925e0b
-1507	1649	8063199629447288	ocl_test_findmax	7ba4f244f464c700
