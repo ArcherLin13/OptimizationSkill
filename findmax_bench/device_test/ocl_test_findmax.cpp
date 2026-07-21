@@ -169,15 +169,17 @@ void fillHalfImage(std::vector<uint16_t>& img, int w, int h, float& ref_max) {
     const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
     img.resize(n);
     ref_max = -1e30f;
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            float v = static_cast<float>(((x * 13 + y * 7) % 1000)) / 1000.f;
-            if (x == w * 2 / 3 && y == h * 3 / 5) {
-                v = 12.5f;
-            }
-            img[static_cast<size_t>(y) * w + x] = floatToHalf(v);
-            ref_max = std::max(ref_max, v);
+    // Peak at last pixel so tiny images (1x1) still have a clear unique max.
+    const size_t peak_i = n > 0 ? n - 1 : 0;
+    for (size_t i = 0; i < n; ++i) {
+        const int x = static_cast<int>(i % static_cast<size_t>(w));
+        const int y = static_cast<int>(i / static_cast<size_t>(w));
+        float v = static_cast<float>(((x * 13 + y * 7) % 1000)) / 1000.f;
+        if (i == peak_i) {
+            v = 12.5f;
         }
+        img[i] = floatToHalf(v);
+        ref_max = std::max(ref_max, v);
     }
 }
 
@@ -279,6 +281,9 @@ BenchResult runCase(cl_command_queue queue, cl_mem buf_max, KernelCase& c, float
 }  // namespace
 
 int main(int argc, char** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+
     const Args args = parseArgs(argc, argv);
     if (args.lwsx * args.lwsy > 256) {
         std::fprintf(stderr, "orig requires lwsx*lwsy <= 256\n");
@@ -298,15 +303,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 #endif
-
-    const int W = args.width;
-    const int H = args.height;
-    const size_t nPix = static_cast<size_t>(W) * static_cast<size_t>(H);
-    const size_t bytes = nPix * sizeof(uint16_t);
-
-    std::vector<uint16_t> host;
-    float ref_max = 0.f;
-    fillHalfImage(host, W, H, ref_max);
 
     cl_uint np = 0;
     OCL_CHECK(clGetPlatformIDs(0, nullptr, &np), "platforms");
@@ -328,11 +324,113 @@ int main(int argc, char** argv) {
     cl_program prog_mine = buildProgram(ctx, device, args.mine_path, opts_1d);
     cl_program prog_opt = buildProgram(ctx, device, args.opt_path, opts_opt);
 
+    cl_kernel kn_opt = clCreateKernel(prog_opt, "findMaxValue", &err);
+    OCL_CHECK(err, "opt kn");
+    cl_mem buf_max = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
+    OCL_CHECK(err, "max");
+
+    const size_t lws_opt = static_cast<size_t>(args.lws_opt);
+    const size_t gws_opt = lws_opt * static_cast<size_t>(args.nwg);
+
+    std::printf("=== findMaxValue ===\n");
+    std::printf("device: %s\n", deviceName(device).c_str());
+    std::printf("\nNOTE: opt uses FIXED gws=%zu (=lws %zu * nwg %d), NOT width*height.\n", gws_opt,
+                lws_opt, args.nwg);
+    std::printf("      Each WI does: for (i = gid; i < n; i += gws)  // grid-stride\n");
+    std::printf("      So any image size is OK (n << gws or n >> gws).\n\n");
+
+    const struct {
+        int w, h;
+        const char* note;
+    } kSizes[] = {
+        {1, 1, "tiny"},
+        {3, 5, "odd, n not multiple of 4"},
+        {7, 9, "odd small"},
+        {63, 63, "n not multiple of gws"},
+        {64, 64, "small square"},
+        {100, 100, "n < gws"},
+        {640, 480, "VGA"},
+        {1920, 1080, "FHD"},
+        {1920, 1081, "odd height"},
+        {4096, 1, "wide 1-row"},
+        {1, 4096, "tall 1-col"},
+        {5760, 4320, "default"},
+        {args.width, args.height, "cli"},
+    };
+
+    std::printf("--- opt size sweep (same gws=%zu for all sizes) ---\n", gws_opt);
+    int fail = 0;
+    for (const auto& s : kSizes) {
+        if (s.w <= 0 || s.h <= 0) {
+            continue;
+        }
+        std::vector<uint16_t> img;
+        float ref_max = 0.f;
+        fillHalfImage(img, s.w, s.h, ref_max);
+        const size_t nbytes = img.size() * sizeof(uint16_t);
+        cl_mem buf_src =
+            clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, nbytes, img.data(), &err);
+        if (err != CL_SUCCESS) {
+            std::printf("  %4dx%-4d  CREATE fail %d [%s]\n", s.w, s.h, err, s.note);
+            ++fail;
+            continue;
+        }
+        const unsigned wu = static_cast<unsigned>(s.w);
+        const unsigned hu = static_cast<unsigned>(s.h);
+        setCommonArgs(kn_opt, buf_src, wu, hu, buf_max);
+        uint32_t init = floatToHalf(-65504.0f);
+        OCL_CHECK(clEnqueueWriteBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &init, 0,
+                                       nullptr, nullptr),
+                  "reset");
+        cl_event ev = nullptr;
+        err = clEnqueueNDRangeKernel(queue, kn_opt, 1, nullptr, &gws_opt, &lws_opt, 0, nullptr, &ev);
+        if (err != CL_SUCCESS) {
+            std::printf("  %4dx%-4d  ENQUEUE fail %d n=%zu [%s]\n", s.w, s.h, err, img.size(),
+                        s.note);
+            ++fail;
+            clReleaseMemObject(buf_src);
+            continue;
+        }
+        err = clWaitForEvents(1, &ev);
+        clReleaseEvent(ev);
+        if (err != CL_SUCCESS) {
+            std::printf("  %4dx%-4d  WAIT fail %d [%s]\n", s.w, s.h, err, s.note);
+            ++fail;
+            clReleaseMemObject(buf_src);
+            continue;
+        }
+        uint32_t got_bits = 0;
+        OCL_CHECK(clEnqueueReadBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &got_bits, 0,
+                                      nullptr, nullptr),
+                  "read");
+        const float got = halfToFloat(static_cast<uint16_t>(got_bits & 0xffffu));
+        const float abs_err = std::fabs(got - ref_max);
+        const bool ok = abs_err < 1e-2f;
+        std::printf("  %4dx%-4d n=%8zu ref=%.4f gpu=%.4f err=%.2e %s [%s]\n", s.w, s.h, img.size(),
+                    ref_max, got, abs_err, ok ? "OK" : "FAIL", s.note);
+        if (!ok) {
+            ++fail;
+        }
+        clReleaseMemObject(buf_src);
+    }
+    if (fail) {
+        std::fprintf(stderr, "size sweep FAIL=%d\n", fail);
+        return 1;
+    }
+    std::printf("size sweep: all OK\n\n");
+
+    const int W = args.width;
+    const int H = args.height;
+    const size_t nPix = static_cast<size_t>(W) * static_cast<size_t>(H);
+    const size_t bytes = nPix * sizeof(uint16_t);
+
+    std::vector<uint16_t> host;
+    float ref_max = 0.f;
+    fillHalfImage(host, W, H, ref_max);
+
     cl_mem buf_src =
         clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes, host.data(), &err);
     OCL_CHECK(err, "src");
-    cl_mem buf_max = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
-    OCL_CHECK(err, "max");
 
     const unsigned int wu = static_cast<unsigned int>(W);
     const unsigned int hu = static_cast<unsigned int>(H);
@@ -359,36 +457,28 @@ int main(int argc, char** argv) {
 
     KernelCase opt;
     opt.name = "opt_stride";
-    opt.kn = clCreateKernel(prog_opt, "findMaxValue", &err);
-    OCL_CHECK(err, "opt kn");
+    opt.kn = kn_opt;
     opt.dim = 1;
-    opt.lws[0] = static_cast<size_t>(args.lws_opt);
-    opt.gws[0] = static_cast<size_t>(args.lws_opt) * static_cast<size_t>(args.nwg);
+    opt.lws[0] = lws_opt;
+    opt.gws[0] = gws_opt;
     setCommonArgs(opt.kn, buf_src, wu, hu, buf_max);
 
-    const double elems_per_wi =
-        static_cast<double>(nPix) / static_cast<double>(opt.gws[0]);
-
-    std::printf("=== findMaxValue: orig vs base vs opt(OCR-style) ===\n");
-    std::printf("device: %s\n", deviceName(device).c_str());
-    std::printf("size:   %d x %d = %.2f MP\n", W, H, nPix / 1e6);
-    std::printf("orig:   2D gws=(%zu,%zu) lws=(%zu,%zu)  ~1 px/WI, ~%zu atomics\n", orig.gws[0],
-                orig.gws[1], orig.lws[0], orig.lws[1],
-                (orig.gws[0] / orig.lws[0]) * (orig.gws[1] / orig.lws[1]));
-    std::printf("base:   1D gws=%zu lws=%zu  ~1 px/WI\n", mine.gws[0], mine.lws[0]);
-    std::printf("opt:    1D gws=%zu lws=%zu nwg=%d  ~%.1f px/WI, %d atomics, half4\n\n", opt.gws[0],
-                opt.lws[0], args.nwg, elems_per_wi, args.nwg);
+    const double elems_per_wi = static_cast<double>(nPix) / static_cast<double>(opt.gws[0]);
+    std::printf("--- timed bench %dx%d ---\n", W, H);
+    std::printf("orig gws=(%zu,%zu)  base gws=%zu  opt gws=%zu (~%.1f px/WI)\n\n", orig.gws[0],
+                orig.gws[1], mine.gws[0], opt.gws[0], elems_per_wi);
 
     const BenchResult r_orig = runCase(queue, buf_max, orig, ref_max, args.warmup, args.runs);
     const BenchResult r_mine = runCase(queue, buf_max, mine, ref_max, args.warmup, args.runs);
     const BenchResult r_opt = runCase(queue, buf_max, opt, ref_max, args.warmup, args.runs);
 
     const double gb = bytes / 1e9;
-    std::printf("\n--- kernel time only (avg %d runs) ---\n", args.runs);
-    std::printf("  %-14s %10s %10s %10s %12s\n", "impl", "avg_ms", "best_ms", "vs_orig", "GB/s");
+    std::printf("\n--- kernel time (avg %d) ---\n", args.runs);
+    std::printf("  %-14s %10s %10s %10s\n", "impl", "avg_ms", "best_ms", "vs_orig");
     auto row = [&](const char* name, const BenchResult& r) {
-        std::printf("  %-14s %10.3f %10.3f %9.2fx %12.2f\n", name, r.avg_ms, r.best_ms,
-                    r_orig.avg_ms / std::max(r.avg_ms, 1e-9), gb / (r.avg_ms / 1e3));
+        std::printf("  %-14s %10.3f %10.3f %9.2fx\n", name, r.avg_ms, r.best_ms,
+                    r_orig.avg_ms / std::max(r.avg_ms, 1e-9));
+        (void)gb;
     };
     row("orig_2d_1px", r_orig);
     row("base_1d_1px", r_mine);
