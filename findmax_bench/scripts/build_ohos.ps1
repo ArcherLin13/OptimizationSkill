@@ -57,11 +57,13 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Push-Location $BuildDir
 try {
-    & $Ninja ocl_test_findmax
+    & $Ninja ocl_test_findmax ocl_test_enhance
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally {
     Pop-Location
 }
 
 Write-Host "Built: $BuildDir\ocl_test_findmax"
-Write-Host "Next:  .\scripts\run_device.ps1"
+Write-Host "Built: $BuildDir\ocl_test_enhance"
+Write-Host "Next:  .\scripts\run_device.ps1   (findmax only)"
+Write-Host "       .\scripts\run_enhance.ps1 (findmax+enhance fused)"
