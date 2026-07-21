@@ -28,3 +28,4 @@ endfunction()
 
 add_findmax_ocl_test(ocl_test_findmax device_test/ocl_test_findmax.cpp)
 add_findmax_ocl_test(ocl_test_enhance device_test/ocl_test_enhance.cpp)
+add_findmax_ocl_test(ocl_test_enhance_only device_test/ocl_test_enhance_only.cpp)
