@@ -176,20 +176,21 @@ void fillHalfImage(std::vector<uint16_t>& img, int w, int h, float& ref_max) {
     img.resize(n);
     ref_max = -1e30f;
     // Peak MUST be < 1 so enhance actually scales (divisor=max, inv=1/max).
-    // Old peak 12.5 made divisor=1 → enhance no-op → false OK even if enhance never ran.
+    // Put peak at last pixel so 1x1 / tiny images still work.
     const float kPeak = 0.25f;
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            float v = static_cast<float>(((x * 13 + y * 7) % 1000)) / 1000.f;  // [0,1)
-            if (v >= kPeak) {
-                v = kPeak * 0.5f;  // keep unique global max at injected pixel
-            }
-            if (x == w * 2 / 3 && y == h * 3 / 5) {
-                v = kPeak;
-            }
-            img[static_cast<size_t>(y) * w + x] = floatToHalf(v);
-            ref_max = std::max(ref_max, v);
+    const size_t peak_i = n > 0 ? n - 1 : 0;
+    for (size_t i = 0; i < n; ++i) {
+        const int x = static_cast<int>(i % static_cast<size_t>(w));
+        const int y = static_cast<int>(i / static_cast<size_t>(w));
+        float v = static_cast<float>(((x * 13 + y * 7) % 1000)) / 1000.f;  // [0,1)
+        if (v >= kPeak) {
+            v = kPeak * 0.5f;
         }
+        if (i == peak_i) {
+            v = kPeak;
+        }
+        img[i] = floatToHalf(v);
+        ref_max = std::max(ref_max, v);
     }
 }
 
@@ -266,17 +267,6 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    const int W = args.width;
-    const int H = args.height;
-    const size_t nPix = static_cast<size_t>(W) * static_cast<size_t>(H);
-    const size_t bytes = nPix * sizeof(uint16_t);
-
-    std::vector<uint16_t> host_src;
-    float ref_max = 0.f;
-    fillHalfImage(host_src, W, H, ref_max);
-    std::vector<uint16_t> host_ref = host_src;
-    cpuEnhance(host_ref, ref_max);
-
     cl_uint np = 0;
     OCL_CHECK(clGetPlatformIDs(0, nullptr, &np), "platforms");
     std::vector<cl_platform_id> platforms(np);
@@ -309,13 +299,135 @@ int main(int argc, char** argv) {
     cl_kernel kn_eno = clCreateKernel(p_eno, "enhanceBrightness", &err);
     OCL_CHECK(err, "enhance opt");
 
+    cl_mem buf_max = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
+    OCL_CHECK(err, "buf_max");
+
+    const size_t lws_o = static_cast<size_t>(args.lws_opt);
+    const size_t gws_o = lws_o * static_cast<size_t>(args.nwg);
+
+    std::printf("##############################################################\n");
+    std::printf("# SIZE SWEEP [C] findmax_opt + enhance_opt\n");
+    std::printf("# fixed gws=%zu (=lws %zu * nwg %d), NOT WxH\n", gws_o, lws_o, args.nwg);
+    std::printf("##############################################################\n");
+    std::printf("device: %s\n\n", deviceName(device).c_str());
+
+    const struct {
+        int w, h;
+        const char* note;
+    } kSizes[] = {
+        {1, 1, "tiny"},
+        {3, 5, "odd small"},
+        {7, 9, "odd"},
+        {63, 63, "n not multiple of gws"},
+        {100, 100, "n < gws"},
+        {640, 480, "VGA"},
+        {1920, 1080, "FHD"},
+        {1920, 1081, "odd height"},
+        {4096, 1, "wide 1-row"},
+        {1, 4096, "tall 1-col"},
+        {args.width, args.height, "cli"},
+    };
+
+    std::printf("--- opt pipeline size sweep (same gws=%zu) ---\n", gws_o);
+    int sweep_fail = 0;
+    for (const auto& s : kSizes) {
+        if (s.w <= 0 || s.h <= 0) {
+            continue;
+        }
+        std::vector<uint16_t> img;
+        float rmax = 0.f;
+        fillHalfImage(img, s.w, s.h, rmax);
+        std::vector<uint16_t> ref = img;
+        cpuEnhance(ref, rmax);
+        const size_t nbytes = img.size() * sizeof(uint16_t);
+        cl_mem bsrc = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, nbytes,
+                                     img.data(), &err);
+        if (err != CL_SUCCESS) {
+            std::printf("  %4dx%-4d CREATE fail %d [%s]\n", s.w, s.h, err, s.note);
+            ++sweep_fail;
+            continue;
+        }
+        const unsigned wu_s = static_cast<unsigned>(s.w);
+        const unsigned hu_s = static_cast<unsigned>(s.h);
+        set4(kn_fmo, bsrc, wu_s, hu_s, buf_max);
+        set4(kn_eno, bsrc, wu_s, hu_s, buf_max);
+        uint32_t init = floatToHalf(-65504.0f);
+        OCL_CHECK(clEnqueueWriteBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &init, 0,
+                                       nullptr, nullptr),
+                  "sweep reset");
+        cl_event e0 = nullptr, e1 = nullptr;
+        err = clEnqueueNDRangeKernel(queue, kn_fmo, 1, nullptr, &gws_o, &lws_o, 0, nullptr, &e0);
+        if (err != CL_SUCCESS) {
+            std::printf("  %4dx%-4d findmax ENQUEUE fail %d [%s]\n", s.w, s.h, err, s.note);
+            ++sweep_fail;
+            clReleaseMemObject(bsrc);
+            continue;
+        }
+        err = clWaitForEvents(1, &e0);
+        clReleaseEvent(e0);
+        if (err != CL_SUCCESS) {
+            std::printf("  %4dx%-4d findmax WAIT fail %d [%s]\n", s.w, s.h, err, s.note);
+            ++sweep_fail;
+            clReleaseMemObject(bsrc);
+            continue;
+        }
+        err = clEnqueueNDRangeKernel(queue, kn_eno, 1, nullptr, &gws_o, &lws_o, 0, nullptr, &e1);
+        if (err != CL_SUCCESS) {
+            std::printf("  %4dx%-4d enhance ENQUEUE fail %d [%s]\n", s.w, s.h, err, s.note);
+            ++sweep_fail;
+            clReleaseMemObject(bsrc);
+            continue;
+        }
+        err = clWaitForEvents(1, &e1);
+        clReleaseEvent(e1);
+        if (err != CL_SUCCESS) {
+            std::printf("  %4dx%-4d enhance WAIT fail %d [%s]\n", s.w, s.h, err, s.note);
+            ++sweep_fail;
+            clReleaseMemObject(bsrc);
+            continue;
+        }
+        uint32_t max_bits = 0;
+        OCL_CHECK(clEnqueueReadBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &max_bits, 0,
+                                      nullptr, nullptr),
+                  "sweep read max");
+        const float gpu_max = halfToFloat(static_cast<uint16_t>(max_bits & 0xffffu));
+        std::vector<uint16_t> out(img.size());
+        OCL_CHECK(clEnqueueReadBuffer(queue, bsrc, CL_TRUE, 0, nbytes, out.data(), 0, nullptr,
+                                      nullptr),
+                  "sweep read src");
+        const float max_err = std::fabs(gpu_max - rmax);
+        const float img_err = maxAbsDiffHalf(out, ref);
+        const float vs_in = meanAbsDiffHalf(out, img);
+        const bool ok = (max_err < 1e-2f) && (img_err < 2e-2f) && (vs_in > 1e-3f);
+        std::printf("  %4dx%-4d n=%8zu max_err=%.2e img_err=%.2e %s [%s]\n", s.w, s.h, img.size(),
+                    max_err, img_err, ok ? "OK" : "FAIL", s.note);
+        if (!ok) {
+            ++sweep_fail;
+        }
+        clReleaseMemObject(bsrc);
+    }
+    if (sweep_fail) {
+        std::fprintf(stderr, "size sweep FAIL=%d\n", sweep_fail);
+        return 1;
+    }
+    std::printf("size sweep: all OK\n\n");
+
+    const int W = args.width;
+    const int H = args.height;
+    const size_t nPix = static_cast<size_t>(W) * static_cast<size_t>(H);
+    const size_t bytes = nPix * sizeof(uint16_t);
+
+    std::vector<uint16_t> host_src;
+    float ref_max = 0.f;
+    fillHalfImage(host_src, W, H, ref_max);
+    std::vector<uint16_t> host_ref = host_src;
+    cpuEnhance(host_ref, ref_max);
+
     cl_mem buf_src = clCreateBuffer(ctx, CL_MEM_READ_WRITE, bytes, nullptr, &err);
     OCL_CHECK(err, "buf_src");
     cl_mem buf_gold =
         clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes, host_src.data(), &err);
     OCL_CHECK(err, "buf_gold");
-    cl_mem buf_max = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
-    OCL_CHECK(err, "buf_max");
 
     const unsigned wu = (unsigned)W, hu = (unsigned)H;
     set4(kn_fm, buf_src, wu, hu, buf_max);
@@ -330,9 +442,6 @@ int main(int argc, char** argv) {
     // B fused: single WG only (device-side multi-WG wait hangs on this GPU).
     size_t lws_fu = (size_t)args.lws_opt;
     size_t gws_fu = lws_fu;
-    // C opt 2-kernel: multi-WG (host queue order = global sync)
-    size_t lws_o = (size_t)args.lws_opt;
-    size_t gws_o = lws_o * (size_t)args.nwg;
 
     auto restoreSrc = [&] {
         OCL_CHECK(clEnqueueCopyBuffer(queue, buf_gold, buf_src, 0, 0, bytes, 0, nullptr, nullptr),

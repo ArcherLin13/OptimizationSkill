@@ -337,7 +337,7 @@ int main(int argc, char** argv) {
     std::printf("\n############################################################\n");
     std::printf("# SIZE SWEEP: fixed gws=%zu (lws %zu * nwg %d), NOT WxH\n", gws_opt, lws_opt,
                 args.nwg);
-    std::printf("# grid-stride: for (i=gid; i<n; i+=gws)  — any image size OK\n");
+    std::printf("# grid-stride: for (i=gid; i<n; i+=gws)  -- any image size OK\n");
     std::printf("############################################################\n\n");
 
     const struct {

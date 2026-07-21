@@ -22,7 +22,7 @@ $Kernels = @(
 )
 
 if (-not $SkipBuild) {
-    Write-Host "Building (to pick up size sweep) ..."
+    Write-Host "Building..."
     & (Join-Path $PSScriptRoot "build_ohos.ps1")
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
@@ -46,12 +46,14 @@ if ($targets -match "Empty") {
     exit 1
 }
 
+$exeTime = (Get-Item -LiteralPath $Exe).LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
 Write-Host "============================================================"
-Write-Host " RUN: ocl_test_findmax  (findMax ONLY — no enhance)"
-Write-Host " Expect FIRST: --- opt size sweep --- then timed bench"
+Write-Host " RUN: ocl_test_findmax  - findMax ONLY, no enhance"
+Write-Host " Expect FIRST: SIZE SWEEP banner, then timed bench"
 Write-Host " For pipeline: .\scripts\run_enhance.ps1"
 Write-Host "============================================================"
-Write-Host "Local exe: $Exe  ($((Get-Item $Exe).LastWriteTime))"
+Write-Host "Local exe: $Exe"
+Write-Host "Exe mtime: $exeTime"
 
 & $Hdc shell "mkdir -p $RemoteDir"
 & $Hdc file send $Exe "$RemoteDir/ocl_test_findmax"

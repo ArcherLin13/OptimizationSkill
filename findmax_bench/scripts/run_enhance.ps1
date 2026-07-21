@@ -7,7 +7,8 @@ param(
     [int]$LwsX = 16,
     [int]$LwsY = 16,
     [int]$LwsOpt = 256,
-    [int]$Nwg = 256
+    [int]$Nwg = 256,
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +21,12 @@ $Kernels = @(
     (Join-Path $Root "findmax_opt.cl"),
     (Join-Path $Root "enhance_brightness_opt.cl")
 )
+
+if (-not $SkipBuild) {
+    Write-Host "Building..."
+    & (Join-Path $PSScriptRoot "build_ohos.ps1")
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 
 if ([string]::IsNullOrWhiteSpace($OhosNative)) {
     $OhosNative = "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\native"
@@ -40,10 +47,14 @@ if ($targets -match "Empty") {
     exit 1
 }
 
+$exeTime = (Get-Item -LiteralPath $Exe).LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
 Write-Host "============================================================"
-Write-Host " RUN: ocl_test_enhance  (findMax + enhanceBrightness pipeline)"
-Write-Host " A=baseline 2k  B=fused 1WG  C=opt 2k (recommended)"
+Write-Host " RUN: ocl_test_enhance  - findMax + enhanceBrightness"
+Write-Host " Expect FIRST: SIZE SWEEP for opt path C, then A/B/C bench"
+Write-Host " A=baseline 2k  B=fused 1WG  C=opt 2k"
 Write-Host "============================================================"
+Write-Host "Local exe: $Exe"
+Write-Host "Exe mtime: $exeTime"
 
 & $Hdc shell "mkdir -p $RemoteDir"
 & $Hdc file send $Exe "$RemoteDir/ocl_test_enhance"
