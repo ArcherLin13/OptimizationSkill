@@ -244,6 +244,11 @@ void set4(cl_kernel kn, cl_mem src, unsigned w, unsigned h, cl_mem mx) {
     OCL_CHECK(clSetKernelArg(kn, 3, sizeof(cl_mem), &mx), "a3");
 }
 
+void set5(cl_kernel kn, cl_mem src, unsigned w, unsigned h, cl_mem mx, cl_mem sync) {
+    set4(kn, src, w, h, mx);
+    OCL_CHECK(clSetKernelArg(kn, 4, sizeof(cl_mem), &sync), "a4");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -316,20 +321,22 @@ int main(int argc, char** argv) {
     OCL_CHECK(err, "buf_gold");
     cl_mem buf_max = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
     OCL_CHECK(err, "buf_max");
+    cl_mem buf_sync = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_int) * 2, nullptr, &err);
+    OCL_CHECK(err, "buf_sync");
 
     const unsigned wu = (unsigned)W, hu = (unsigned)H;
     set4(kn_fm, buf_src, wu, hu, buf_max);
     set4(kn_en, buf_src, wu, hu, buf_max);
-    set4(kn_fu, buf_src, wu, hu, buf_max);
+    set5(kn_fu, buf_src, wu, hu, buf_max, buf_sync);
     set4(kn_fmo, buf_src, wu, hu, buf_max);
     set4(kn_eno, buf_src, wu, hu, buf_max);
 
     size_t gws2[2] = {((size_t)W + args.lwsx - 1) / args.lwsx * args.lwsx,
                       ((size_t)H + args.lwsy - 1) / args.lwsy * args.lwsy};
     size_t lws2[2] = {(size_t)args.lwsx, (size_t)args.lwsy};
-    // Fused: MUST be single WG (local barrier only).
+    // Fused multi-WG: lid0-only grid sync (all-lane spin caused CL_-14).
     size_t lws_fu = (size_t)args.lws_opt;
-    size_t gws_fu = lws_fu;
+    size_t gws_fu = lws_fu * (size_t)args.nwg;
     // Opt 2-kernel: multi-WG stride
     size_t lws_o = (size_t)args.lws_opt;
     size_t gws_o = lws_o * (size_t)args.nwg;
@@ -344,6 +351,12 @@ int main(int argc, char** argv) {
         OCL_CHECK(clEnqueueWriteBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &init, 0,
                                        nullptr, nullptr),
                   "reset max");
+    };
+    auto resetSync = [&] {
+        int z[2] = {0, 0};
+        OCL_CHECK(
+            clEnqueueWriteBuffer(queue, buf_sync, CL_TRUE, 0, sizeof(z), z, 0, nullptr, nullptr),
+            "reset sync");
     };
 
     std::vector<uint16_t> out(nPix);
@@ -385,15 +398,14 @@ int main(int argc, char** argv) {
     std::printf("##############################################################\n");
     std::printf("# PIPELINE: findMax + enhanceBrightness\n");
     std::printf("#   A) baseline 2k: orig findmax + enhance (2D 1px)\n");
-    std::printf("#   B) fused 1k:    findMaxAndEnhance (SINGLE WG, safe)\n");
-    std::printf("#   C) opt 2k:      findmax_opt + enhance_opt (stride/half4)\n");
-    std::printf("#   (old multi-WG grid-sync fused -> CL_-14, removed)\n");
+    std::printf("#   B) fused 1k:    multi-WG + lid0-only grid sync + enhance\n");
+    std::printf("#   C) opt 2k:      findmax_opt + enhance_opt\n");
     std::printf("##############################################################\n");
     std::printf("device: %s\n", deviceName(device).c_str());
     std::printf("size: %d x %d  ref_max=%.4f divisor=%.4f inv=%.4f  (max<1 so enhance is NOT no-op)\n",
                 W, H, ref_max, std::min(1.f, ref_max), 1.f / std::min(1.f, ref_max));
     std::printf("[A] gws=(%zu,%zu) lws=(%zu,%zu)\n", gws2[0], gws2[1], lws2[0], lws2[1]);
-    std::printf("[B] gws=%zu lws=%zu (nwg=1)\n", gws_fu, lws_fu);
+    std::printf("[B] gws=%zu lws=%zu nwg=%d (fused multi-WG)\n", gws_fu, lws_fu, args.nwg);
     std::printf("[C] gws=%zu lws=%zu nwg=%d\n\n", gws_o, lws_o, args.nwg);
 
     std::printf("--- correctness ---\n");
@@ -412,6 +424,7 @@ int main(int argc, char** argv) {
 
     restoreSrc();
     resetMax();
+    resetSync();
     {
         cl_event e = nullptr;
         OCL_CHECK(clEnqueueNDRangeKernel(queue, kn_fu, 1, nullptr, &gws_fu, &lws_fu, 0, nullptr, &e),
@@ -419,7 +432,7 @@ int main(int argc, char** argv) {
         OCL_CHECK(clWaitForEvents(1, &e), "Bw");
         clReleaseEvent(e);
     }
-    checkOut("B fused 1-WG");
+    checkOut("B fused multi-WG");
 
     restoreSrc();
     resetMax();
@@ -482,6 +495,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < args.warmup; ++i) {
             restoreSrc();
             resetMax();
+            resetSync();
             cl_event e = nullptr;
             OCL_CHECK(clEnqueueNDRangeKernel(queue, k, 1, nullptr, g, l, 0, nullptr, &e), "w");
             OCL_CHECK(clWaitForEvents(1, &e), "ww");
@@ -491,6 +505,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < args.runs; ++i) {
             restoreSrc();
             resetMax();
+            resetSync();
             OCL_CHECK(clFinish(queue), "fin");
             cl_event e = nullptr;
             OCL_CHECK(clEnqueueNDRangeKernel(queue, k, 1, nullptr, g, l, 0, nullptr, &e), "t");
@@ -516,7 +531,7 @@ int main(int argc, char** argv) {
     std::printf("==============================================================\n");
     std::printf(" PIPELINE SUMMARY (ms)\n");
     std::printf("  [A] baseline findmax+enhance  %.3f + %.3f = %.3f\n", a0, a1, a_tot);
-    std::printf("  [B] fused 1-kernel (1 WG)     %.3f\n", b_avg);
+    std::printf("  [B] fused 1-kernel multi-WG   %.3f\n", b_avg);
     std::printf("  [C] opt findmax+enhance       %.3f + %.3f = %.3f\n", c0, c1, c_tot);
     std::printf("  A/B=%.2fx  A/C=%.2fx  ( >1 means faster than baseline )\n",
                 a_tot / std::max(b_avg, 1e-9), a_tot / std::max(c_tot, 1e-9));
@@ -525,6 +540,7 @@ int main(int argc, char** argv) {
     clReleaseMemObject(buf_src);
     clReleaseMemObject(buf_gold);
     clReleaseMemObject(buf_max);
+    clReleaseMemObject(buf_sync);
     clReleaseKernel(kn_fm);
     clReleaseKernel(kn_en);
     clReleaseKernel(kn_fu);

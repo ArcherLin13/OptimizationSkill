@@ -5,7 +5,7 @@
 | path | what |
 |---|---|
 | **A baseline** | `findmax_orig_2d` + `enhance_brightness`（2 kernels, 2D 1px） |
-| **B fused** | `findMaxAndEnhance` **1 kernel, 1 workgroup**（只有 local barrier；跨 WG spin 会 CL_-14） |
+| **B fused** | `findMaxAndEnhance` 1 kernel，**多 WG**；grid sync 只让 `lid==0` 自旋（全 lane 自旋会饿死未调度 WG → CL_-14） |
 | **C opt** | `findmax_opt` + `enhance_brightness_opt`（2 kernels, stride/`half4`，通常最快） |
 
 Enhance: `divisor=fmin(1,max)`, `src *= 1/divisor`.

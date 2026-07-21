@@ -42,7 +42,7 @@ if ($targets -match "Empty") {
 
 Write-Host "============================================================"
 Write-Host " RUN: ocl_test_enhance  (findMax + enhanceBrightness pipeline)"
-Write-Host " A=baseline 2k  B=fused 1WG  C=opt 2k"
+Write-Host " A=baseline 2k  B=fused multi-WG  C=opt 2k"
 Write-Host "============================================================"
 
 & $Hdc shell "mkdir -p $RemoteDir"

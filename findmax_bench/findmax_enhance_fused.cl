@@ -1,26 +1,50 @@
-// True 1-kernel findMax + enhance (NO cross-WG spin — that caused CL_-14 on device).
-// Launch with a SINGLE workgroup: gws == lws == LSIZE (nwg=1).
-// Phase1: grid-stride half4 max + local reduce
-// Phase2: same WI enhance in-place (local barrier only)
+// Fused findMax + enhanceBrightness, multi-WG capable.
 //
-// API: (src, width, height, max_value)  — same 4 args as findmax (no sync buffer)
+// Phase 1: grid-stride half4 max + local reduce + 1 atomic_max per WG
+// Phase 2: grid sync (ONLY lid==0 spins — all-lanes spin deadlocks when WGs
+//           oversubscribe and starve the last arrivers), then enhance.
+//
+// Args:
+//   src, width, height, max_value (4B half layout),
+//   sync: int2 — [0]=arrive count (init 0), [1]=ready (init 0)
+//
+// Launch: gws = LSIZE * nwg, lws = LSIZE  (nwg>=1)
 
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable
 
 #ifndef LSIZE
 #define LSIZE 256
 #endif
 
+inline void atomic_max_half(__global half* addr, half val) {
+    volatile __global uint* up = (volatile __global uint*)addr;
+    uint old = *up;
+    for (;;) {
+        const half old_h = as_half((ushort)(old & 0xffffu));
+        if ((float)val <= (float)old_h) {
+            return;
+        }
+        const uint neu = (old & 0xffff0000u) | (uint)as_ushort(val);
+        const uint prev = atom_cmpxchg(up, old, neu);
+        if (prev == old) {
+            return;
+        }
+        old = prev;
+    }
+}
+
 __kernel void findMaxAndEnhance(__global half* src, unsigned int width, unsigned int height,
-                                __global half* max_value) {
+                                __global half* max_value, __global volatile int* sync) {
     __local float reduce_buf[LSIZE];
 
     const uint lid = get_local_id(0);
     const uint gid = get_global_id(0);
     const uint gsize = get_global_size(0);
+    const uint nwg = get_num_groups(0);
     const uint n = width * height;
 
-    // ----- Phase 1: max -----
+    // ----- Phase 1: per-lane max + WG reduce -----
     float lane_max = -65504.0f;
     const uint n4 = n >> 2;
     for (uint i = gid; i < n4; i += gsize) {
@@ -41,15 +65,32 @@ __kernel void findMaxAndEnhance(__global half* src, unsigned int width, unsigned
         barrier(CLK_LOCAL_MEM_FENCE);
     }
 
+    // Publish WG max, then arrive. Only lid 0 participates in grid sync.
     if (lid == 0) {
-        // Publish max (4B layout, low 16 = half)
-        volatile __global uint* up = (volatile __global uint*)max_value;
-        *up = (uint)as_ushort((half)reduce_buf[0]);
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
+        atomic_max_half(max_value, (half)reduce_buf[0]);
+        mem_fence(CLK_GLOBAL_MEM_FENCE);
 
-    // ----- Phase 2: enhance -----
-    const float mv = reduce_buf[0];
+        // Arrive AFTER this WG's atomic_max is done.
+        const int ticket = atom_inc((__global int*)&sync[0]);
+        if (ticket == (int)nwg - 1) {
+            // Last arriver: global max is complete.
+            atom_xchg((__global int*)&sync[1], 1);
+        } else {
+            // Wait for last arriver. Do NOT spin on every lane — that starves
+            // not-yet-scheduled WGs and causes device hang / CL_-14.
+            while (*(volatile __global int*)&sync[1] == 0) {
+                mem_fence(CLK_GLOBAL_MEM_FENCE);
+            }
+        }
+        mem_fence(CLK_GLOBAL_MEM_FENCE);
+    }
+
+    // Other lanes wait here until lid0 finished grid sync.
+    barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+
+    // ----- Phase 2: enhance in-place -----
+    const uint max_bits = *(__global uint*)max_value;
+    const float mv = (float)as_half((ushort)(max_bits & 0xffffu));
     const float div = fmin(1.0f, mv);
     const float inv = (div > 1e-7f) ? (1.0f / div) : 1.0f;
 
