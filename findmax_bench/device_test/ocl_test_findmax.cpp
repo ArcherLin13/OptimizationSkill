@@ -1,9 +1,11 @@
-// HarmonyOS OpenCL: findMaxValue baseline bench (kernel time only).
-// Image: half buffer, default 5760x4320.
+// HarmonyOS OpenCL: compare orig(2D) vs mine(1D) findMaxValue.
+// Same logic: 1 px/WI -> workgroup reduce -> atomic global max.
+// Default image 5760x4320.
 //
 // Usage:
-//   ./ocl_test_findmax [--kernel PATH] [--width 5760] [--height 4320] [--runs 30]
-//                       [--wg 256] [--lws 256]
+//   ./ocl_test_findmax [--width 5760] [--height 4320] [--runs 30]
+//                       [--orig findmax_orig_2d.cl] [--mine findmax_baseline.cl]
+//                       [--lwsx 16] [--lwsy 16] [--lws1d 256]
 
 #include <CL/cl.h>
 #ifdef OCR_OPENCL_DLOPEN
@@ -32,20 +34,24 @@ namespace {
     } while (0)
 
 struct Args {
-    std::string kernel_path = "findmax_baseline.cl";
+    std::string orig_path = "findmax_orig_2d.cl";
+    std::string mine_path = "findmax_baseline.cl";
     int width = 5760;
     int height = 4320;
     int runs = 30;
     int warmup = 5;
-    int wg = 256;   // compile-time WG_SIZE
-    int lws = 256;  // local work size (must match WG_SIZE for this kernel)
+    int lwsx = 16;
+    int lwsy = 16;
+    int lws1d = 256;
 };
 
 Args parseArgs(int argc, char** argv) {
     Args a;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--kernel") == 0 && i + 1 < argc) {
-            a.kernel_path = argv[++i];
+        if (std::strcmp(argv[i], "--orig") == 0 && i + 1 < argc) {
+            a.orig_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--mine") == 0 && i + 1 < argc) {
+            a.mine_path = argv[++i];
         } else if (std::strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
             a.width = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
@@ -54,14 +60,16 @@ Args parseArgs(int argc, char** argv) {
             a.runs = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
             a.warmup = std::atoi(argv[++i]);
-        } else if (std::strcmp(argv[i], "--wg") == 0 && i + 1 < argc) {
-            a.wg = std::atoi(argv[++i]);
-        } else if (std::strcmp(argv[i], "--lws") == 0 && i + 1 < argc) {
-            a.lws = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--lwsx") == 0 && i + 1 < argc) {
+            a.lwsx = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--lwsy") == 0 && i + 1 < argc) {
+            a.lwsy = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--lws1d") == 0 && i + 1 < argc) {
+            a.lws1d = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
             std::printf(
-                "Usage: %s [--kernel PATH] [--width W] [--height H] [--runs N] [--wg N] [--lws N]\n"
-                "  Times findMaxValue kernel only (no H2D/D2H in measured region).\n",
+                "Usage: %s [--orig PATH] [--mine PATH] [--width W] [--height H]\n"
+                "          [--lwsx 16] [--lwsy 16] [--lws1d 256] [--runs N]\n",
                 argv[0]);
             std::exit(0);
         }
@@ -102,7 +110,6 @@ double profileMs(cl_event ev) {
     return static_cast<double>(t1 - t0) / 1e6;
 }
 
-// IEEE754 binary16 <-> float (host reference).
 uint16_t floatToHalf(float f) {
     uint32_t x = 0;
     std::memcpy(&x, &f, sizeof(x));
@@ -118,7 +125,7 @@ uint16_t floatToHalf(float f) {
         return static_cast<uint16_t>(sign | t);
     }
     if (exp >= 31) {
-        return static_cast<uint16_t>(sign | 0x7c00u);  // inf
+        return static_cast<uint16_t>(sign | 0x7c00u);
     }
     return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13));
 }
@@ -154,12 +161,11 @@ void fillHalfImage(std::vector<uint16_t>& img, int w, int h, float& ref_max) {
     const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
     img.resize(n);
     ref_max = -1e30f;
-    // Deterministic pattern; inject a known peak away from (0,0).
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            float v = static_cast<float>(((x * 13 + y * 7) % 1000)) / 1000.f;  // [0,1)
+            float v = static_cast<float>(((x * 13 + y * 7) % 1000)) / 1000.f;
             if (x == w * 2 / 3 && y == h * 3 / 5) {
-                v = 12.5f;  // unique max
+                v = 12.5f;
             }
             img[static_cast<size_t>(y) * w + x] = floatToHalf(v);
             ref_max = std::max(ref_max, v);
@@ -167,17 +173,117 @@ void fillHalfImage(std::vector<uint16_t>& img, int w, int h, float& ref_max) {
     }
 }
 
+struct KernelCase {
+    const char* name;
+    cl_kernel kn = nullptr;
+    int dim = 1;
+    size_t gws[2] = {0, 0};
+    size_t lws[2] = {0, 0};
+};
+
+cl_program buildProgram(cl_context ctx, cl_device_id device, const std::string& path,
+                        const char* opts) {
+    const std::string src = readText(path);
+    const char* srcp = src.c_str();
+    size_t srcl = src.size();
+    cl_int err = CL_SUCCESS;
+    cl_program prog = clCreateProgramWithSource(ctx, 1, &srcp, &srcl, &err);
+    OCL_CHECK(err, "clCreateProgramWithSource");
+    err = clBuildProgram(prog, 1, &device, opts, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t log_size = 0;
+        clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+        std::vector<char> log(log_size + 1, 0);
+        clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, log_size, log.data(), nullptr);
+        std::fprintf(stderr, "Build failed (%s):\n%s\n", path.c_str(), log.data());
+        std::exit(1);
+    }
+    return prog;
+}
+
+void setCommonArgs(cl_kernel kn, cl_mem buf_src, unsigned int w, unsigned int h, cl_mem buf_max) {
+    OCL_CHECK(clSetKernelArg(kn, 0, sizeof(cl_mem), &buf_src), "arg0");
+    OCL_CHECK(clSetKernelArg(kn, 1, sizeof(unsigned int), &w), "arg1");
+    OCL_CHECK(clSetKernelArg(kn, 2, sizeof(unsigned int), &h), "arg2");
+    OCL_CHECK(clSetKernelArg(kn, 3, sizeof(cl_mem), &buf_max), "arg3");
+}
+
+void enqueue(cl_command_queue queue, const KernelCase& c, cl_event* ev) {
+    OCL_CHECK(clEnqueueNDRangeKernel(queue, c.kn, c.dim, nullptr, c.gws, c.lws, 0, nullptr, ev),
+              c.name);
+}
+
+struct BenchResult {
+    float gpu_max = 0.f;
+    double avg_ms = 0.0;
+    double best_ms = 0.0;
+};
+
+BenchResult runCase(cl_command_queue queue, cl_mem buf_max, KernelCase& c, float ref_max, int warmup,
+                    int runs) {
+    auto resetMax = [&] {
+        uint32_t init = floatToHalf(-65504.0f);
+        OCL_CHECK(clEnqueueWriteBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &init, 0,
+                                       nullptr, nullptr),
+                  "reset max");
+    };
+
+    resetMax();
+    {
+        cl_event ev = nullptr;
+        enqueue(queue, c, &ev);
+        OCL_CHECK(clWaitForEvents(1, &ev), "correctness wait");
+        clReleaseEvent(ev);
+    }
+    uint32_t got_bits = 0;
+    OCL_CHECK(clEnqueueReadBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &got_bits, 0, nullptr,
+                                  nullptr),
+              "read max");
+    const float got = halfToFloat(static_cast<uint16_t>(got_bits & 0xffffu));
+    const float abs_err = std::fabs(got - ref_max);
+    std::printf("[%s] ref_max=%.6f gpu_max=%.6f abs_err=%.3e %s\n", c.name, ref_max, got, abs_err,
+                abs_err < 1e-2f ? "OK" : "FAIL");
+    if (abs_err >= 1e-2f) {
+        std::exit(1);
+    }
+
+    for (int i = 0; i < warmup; ++i) {
+        resetMax();
+        cl_event ev = nullptr;
+        enqueue(queue, c, &ev);
+        OCL_CHECK(clWaitForEvents(1, &ev), "warmup");
+        clReleaseEvent(ev);
+    }
+
+    double sum = 0.0, best = 1e300;
+    for (int i = 0; i < runs; ++i) {
+        resetMax();
+        OCL_CHECK(clFinish(queue), "finish");
+        cl_event ev = nullptr;
+        enqueue(queue, c, &ev);
+        const double ms = profileMs(ev);
+        clReleaseEvent(ev);
+        sum += ms;
+        best = std::min(best, ms);
+    }
+
+    BenchResult r;
+    r.gpu_max = got;
+    r.avg_ms = sum / runs;
+    r.best_ms = best;
+    return r;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
-    if (args.lws != args.wg) {
-        std::fprintf(stderr, "This baseline kernel requires --lws == --wg (got lws=%d wg=%d)\n",
-                     args.lws, args.wg);
+    if (args.lwsx * args.lwsy > 256) {
+        std::fprintf(stderr, "orig requires lwsx*lwsy <= 256 (got %d)\n", args.lwsx * args.lwsy);
         return 1;
     }
-    if (args.wg <= 0 || (args.wg & (args.wg - 1)) != 0) {
-        std::fprintf(stderr, "--wg must be power-of-two\n");
+    if (args.lws1d <= 0 || (args.lws1d & (args.lws1d - 1)) != 0) {
+        std::fprintf(stderr, "--lws1d must be power-of-two\n");
         return 1;
     }
 
@@ -204,122 +310,75 @@ int main(int argc, char** argv) {
     }
     std::vector<cl_platform_id> platforms(np);
     OCL_CHECK(clGetPlatformIDs(np, platforms.data(), nullptr), "platforms");
-    cl_platform_id platform = platforms[0];
-    cl_device_id device = pickDevice(platform);
+    cl_device_id device = pickDevice(platforms[0]);
 
     cl_int err = CL_SUCCESS;
     cl_context ctx = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
     OCL_CHECK(err, "clCreateContext");
-    cl_command_queue queue =
-        clCreateCommandQueue(ctx, device, CL_QUEUE_PROFILING_ENABLE, &err);
+    cl_command_queue queue = clCreateCommandQueue(ctx, device, CL_QUEUE_PROFILING_ENABLE, &err);
     OCL_CHECK(err, "clCreateCommandQueue");
 
-    const std::string src = readText(args.kernel_path);
-    const char* srcp = src.c_str();
-    size_t srcl = src.size();
-    cl_program prog = clCreateProgramWithSource(ctx, 1, &srcp, &srcl, &err);
-    OCL_CHECK(err, "clCreateProgramWithSource");
+    char opts_mine[128];
+    std::snprintf(opts_mine, sizeof(opts_mine), "-cl-std=CL1.2 -DWG_SIZE=%d", args.lws1d);
+    cl_program prog_orig = buildProgram(ctx, device, args.orig_path, "-cl-std=CL1.2");
+    cl_program prog_mine = buildProgram(ctx, device, args.mine_path, opts_mine);
 
-    char opts[128];
-    std::snprintf(opts, sizeof(opts), "-cl-std=CL1.2 -DWG_SIZE=%d", args.wg);
-    err = clBuildProgram(prog, 1, &device, opts, nullptr, nullptr);
-    if (err != CL_SUCCESS) {
-        size_t log_size = 0;
-        clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
-        std::vector<char> log(log_size + 1, 0);
-        clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, log_size, log.data(), nullptr);
-        std::fprintf(stderr, "Build failed:\n%s\n", log.data());
-        return 1;
-    }
-
-    cl_kernel kn = clCreateKernel(prog, "findMaxValue", &err);
-    OCL_CHECK(err, "clCreateKernel findMaxValue");
-
-    cl_mem buf_src = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes, host.data(),
-                                    &err);
+    cl_mem buf_src =
+        clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes, host.data(), &err);
     OCL_CHECK(err, "buf_src");
-    // 4-byte buffer for atomic_max_half (half in low 16 bits).
     cl_mem buf_max = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
     OCL_CHECK(err, "buf_max");
 
     const unsigned int wu = static_cast<unsigned int>(W);
     const unsigned int hu = static_cast<unsigned int>(H);
-    OCL_CHECK(clSetKernelArg(kn, 0, sizeof(cl_mem), &buf_src), "arg0");
-    OCL_CHECK(clSetKernelArg(kn, 1, sizeof(unsigned int), &wu), "arg1");
-    OCL_CHECK(clSetKernelArg(kn, 2, sizeof(unsigned int), &hu), "arg2");
-    OCL_CHECK(clSetKernelArg(kn, 3, sizeof(cl_mem), &buf_max), "arg3");
 
-    const size_t lws = static_cast<size_t>(args.lws);
-    const size_t gws = ((nPix + lws - 1) / lws) * lws;
+    KernelCase orig;
+    orig.name = "orig_2d";
+    orig.kn = clCreateKernel(prog_orig, "findMaxValue", &err);
+    OCL_CHECK(err, "kernel orig");
+    orig.dim = 2;
+    orig.lws[0] = static_cast<size_t>(args.lwsx);
+    orig.lws[1] = static_cast<size_t>(args.lwsy);
+    orig.gws[0] = ((static_cast<size_t>(W) + orig.lws[0] - 1) / orig.lws[0]) * orig.lws[0];
+    orig.gws[1] = ((static_cast<size_t>(H) + orig.lws[1] - 1) / orig.lws[1]) * orig.lws[1];
+    setCommonArgs(orig.kn, buf_src, wu, hu, buf_max);
 
-    auto resetMax = [&] {
-        uint32_t init = floatToHalf(-65504.0f);  // low 16 = -inf-ish half
-        OCL_CHECK(clEnqueueWriteBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &init, 0,
-                                       nullptr, nullptr),
-                  "reset max");
-    };
+    KernelCase mine;
+    mine.name = "mine_1d";
+    mine.kn = clCreateKernel(prog_mine, "findMaxValue", &err);
+    OCL_CHECK(err, "kernel mine");
+    mine.dim = 1;
+    mine.lws[0] = static_cast<size_t>(args.lws1d);
+    mine.gws[0] = ((nPix + mine.lws[0] - 1) / mine.lws[0]) * mine.lws[0];
+    setCommonArgs(mine.kn, buf_src, wu, hu, buf_max);
 
-    // Correctness once
-    resetMax();
-    {
-        cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn, 1, nullptr, &gws, &lws, 0, nullptr, &ev),
-                  "enqueue correctness");
-        OCL_CHECK(clWaitForEvents(1, &ev), "wait");
-        clReleaseEvent(ev);
-    }
-    uint32_t got_bits = 0;
-    OCL_CHECK(clEnqueueReadBuffer(queue, buf_max, CL_TRUE, 0, sizeof(uint32_t), &got_bits, 0, nullptr,
-                                  nullptr),
-              "read max");
-    const float got = halfToFloat(static_cast<uint16_t>(got_bits & 0xffffu));
-    const float abs_err = std::fabs(got - ref_max);
-
-    std::printf("=== findMaxValue baseline GPU bench ===\n");
+    std::printf("=== findMaxValue: orig(2D) vs mine(1D), same logic ===\n");
     std::printf("device: %s\n", deviceName(device).c_str());
-    std::printf("size:   %d x %d = %.2f MP (%.2f MB half)\n", W, H, nPix / 1e6, bytes / 1e6);
-    std::printf("kernel: %s\n", args.kernel_path.c_str());
-    std::printf("gws=%zu lws=%zu wg=%d\n", gws, lws, args.wg);
-    std::printf("ref_max=%.6f gpu_max=%.6f abs_err=%.3e %s\n\n", ref_max, got,
-                abs_err, abs_err < 1e-2f ? "OK" : "FAIL");
-    if (abs_err >= 1e-2f) {
-        return 1;
-    }
+    std::printf("size:   %d x %d = %.2f MP\n", W, H, nPix / 1e6);
+    std::printf("orig:   %s  gws=(%zu,%zu) lws=(%zu,%zu) local_float[256]\n", args.orig_path.c_str(),
+                orig.gws[0], orig.gws[1], orig.lws[0], orig.lws[1]);
+    std::printf("mine:   %s  gws=%zu lws=%zu local_half[%d]\n\n", args.mine_path.c_str(),
+                mine.gws[0], mine.lws[0], args.lws1d);
 
-    // Warmup
-    for (int i = 0; i < args.warmup; ++i) {
-        resetMax();
-        cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn, 1, nullptr, &gws, &lws, 0, nullptr, &ev),
-                  "warmup");
-        OCL_CHECK(clWaitForEvents(1, &ev), "warmup wait");
-        clReleaseEvent(ev);
-    }
+    const BenchResult r_orig = runCase(queue, buf_max, orig, ref_max, args.warmup, args.runs);
+    const BenchResult r_mine = runCase(queue, buf_max, mine, ref_max, args.warmup, args.runs);
 
-    double sum = 0.0, best = 1e300;
-    for (int i = 0; i < args.runs; ++i) {
-        resetMax();
-        OCL_CHECK(clFinish(queue), "finish before");
-        cl_event ev = nullptr;
-        OCL_CHECK(clEnqueueNDRangeKernel(queue, kn, 1, nullptr, &gws, &lws, 0, nullptr, &ev),
-                  "bench");
-        const double ms = profileMs(ev);
-        clReleaseEvent(ev);
-        sum += ms;
-        best = std::min(best, ms);
-    }
-
-    const double avg = sum / args.runs;
     const double gb = bytes / 1e9;
-    std::printf("--- kernel time only (avg %d runs, reset max not included) ---\n", args.runs);
-    std::printf("  avg:  %.3f ms\n", avg);
-    std::printf("  best: %.3f ms\n", best);
-    std::printf("  ~bandwidth (read src once): %.2f GB/s (avg)\n", gb / (avg / 1e3));
+    std::printf("\n--- kernel time only (avg %d runs) ---\n", args.runs);
+    std::printf("  %-10s %10s %10s %12s\n", "impl", "avg_ms", "best_ms", "GB/s");
+    std::printf("  %-10s %10.3f %10.3f %12.2f\n", "orig_2d", r_orig.avg_ms, r_orig.best_ms,
+                gb / (r_orig.avg_ms / 1e3));
+    std::printf("  %-10s %10.3f %10.3f %12.2f\n", "mine_1d", r_mine.avg_ms, r_mine.best_ms,
+                gb / (r_mine.avg_ms / 1e3));
+    std::printf("  orig/mine: %.2fx ( >1 means mine faster )\n",
+                r_orig.avg_ms / std::max(r_mine.avg_ms, 1e-9));
 
     clReleaseMemObject(buf_src);
     clReleaseMemObject(buf_max);
-    clReleaseKernel(kn);
-    clReleaseProgram(prog);
+    clReleaseKernel(orig.kn);
+    clReleaseKernel(mine.kn);
+    clReleaseProgram(prog_orig);
+    clReleaseProgram(prog_mine);
     clReleaseCommandQueue(queue);
     clReleaseContext(ctx);
     return 0;

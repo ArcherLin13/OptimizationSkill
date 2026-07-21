@@ -1,9 +1,6 @@
-// Baseline findMaxValue:
-//   each WI loads pixel(s) -> local reduction in workgroup -> atomic update global max.
-// API: (__global half* src, unsigned int width, unsigned int height, __global half* max_value)
-//
-// Requires: cl_khr_fp16, 32-bit global atomics (cmpxchg).
-// max_value buffer must be >= 4 bytes and 4-byte aligned (half stored in low 16 bits).
+// Mine: same algorithm as orig (1 px/WI -> WG reduce -> atomic global max),
+// but 1D NDRange + __local half (no float promote in local mem).
+// API identical: (__global half* src, uint width, uint height, __global half* max_value)
 
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable
@@ -13,7 +10,6 @@
 #endif
 
 inline void atomic_max_half(__global half* addr, half val) {
-    // Treat first 4 bytes as uint; half lives in low 16 bits.
     volatile __global uint* up = (volatile __global uint*)addr;
     uint old = *up;
     for (;;) {
