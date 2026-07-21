@@ -297,6 +297,18 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--nwg must be > 0\n");
         return 1;
     }
+    if (args.width <= 0 || args.height <= 0) {
+        std::fprintf(stderr, "--width/--height must be > 0\n");
+        return 1;
+    }
+    {
+        const unsigned long long n64 =
+            static_cast<unsigned long long>(args.width) * static_cast<unsigned long long>(args.height);
+        if (n64 > 0xffffffffULL) {
+            std::fprintf(stderr, "width*height overflows uint (n=%llu)\n", n64);
+            return 1;
+        }
+    }
 
 #ifdef OCR_OPENCL_DLOPEN
     if (!opencl_load()) {
@@ -364,6 +376,14 @@ int main(int argc, char** argv) {
     for (const auto& s : kSizes) {
         if (s.w <= 0 || s.h <= 0) {
             continue;
+        }
+        {
+            const unsigned long long n64 =
+                static_cast<unsigned long long>(s.w) * static_cast<unsigned long long>(s.h);
+            if (n64 > 0xffffffffULL) {
+                std::printf("  %4dx%-4d  SKIP overflow n [%s]\n", s.w, s.h, s.note);
+                continue;
+            }
         }
         std::vector<uint16_t> img;
         float ref_max = 0.f;

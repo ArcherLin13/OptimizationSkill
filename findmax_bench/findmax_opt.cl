@@ -1,13 +1,14 @@
 // OCR-softmax-style findMaxValue (same API as orig):
 //   (__global half* src, unsigned int width, unsigned int height, __global half* max_value)
 //
-// vs 1-px/WI baseline:
-//   - grid-stride: each WI scans many pixels (like softmax_ocr_opt_2d lane loop)
-//   - private lane_max, then local tree reduce
-//   - only 1 atomic per workgroup (not per pixel-group of 1)
-//   - half4 vector loads for coalesced bandwidth
+// Launch (host): gws = LSIZE * nwg, lws == LSIZE  (must match -DLSIZE).
 //
-// Launch (host): gws = lws * nwg, e.g. local=256, nwg=128..512 (NOT width*height).
+// Image bounds (flat layout, n = width*height):
+//   - half4: vload4(i) touches [4*i, 4*i+3]; loop only while i < (n>>2)
+//            => last index = 4*(n>>2)-1 = (n&~3)-1 < n
+ //   - scalar tail: for (i = (n&~3)+gid; i < n; i += gsize)
+//   - n==0: no loads; atomic gets -inf lane (no-op vs typical init)
+// Host must ensure buffer bytes >= n*sizeof(half) and n fits in uint.
 
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable
@@ -38,13 +39,21 @@ __kernel void findMaxValue(__global half* src, unsigned int width, unsigned int 
     __local float reduce_buf[LSIZE];
 
     const uint lid = get_local_id(0);
+    const uint lsize = get_local_size(0);
     const uint gid = get_global_id(0);
     const uint gsize = get_global_size(0);
-    const uint n = width * height;
+
+    // Mis-launch (lws != LSIZE): all WIs take this path (same lsize) — no barrier deadlock.
+    if (lsize != (uint)LSIZE) {
+        return;
+    }
+
+    // Use ulong multiply; if product exceeds uint addressing, treat as empty (host should reject).
+    const ulong n64 = (ulong)width * (ulong)height;
+    const uint n = (n64 > 0xffffffffUL) ? 0u : (uint)n64;
 
     float lane_max = -65504.0f;
 
-    // Vectorized grid-stride over half4 groups (coalesced).
     const uint n4 = n >> 2;
     for (uint i = gid; i < n4; i += gsize) {
         const half4 h = vload4(i, src);
@@ -58,7 +67,7 @@ __kernel void findMaxValue(__global half* src, unsigned int width, unsigned int 
     reduce_buf[lid] = lane_max;
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    for (uint stride = LSIZE >> 1; stride > 0; stride >>= 1) {
+    for (uint stride = (uint)LSIZE >> 1; stride > 0; stride >>= 1) {
         if (lid < stride) {
             reduce_buf[lid] = fmax(reduce_buf[lid], reduce_buf[lid + stride]);
         }
