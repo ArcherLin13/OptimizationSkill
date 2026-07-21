@@ -38,6 +38,11 @@ if ($targets -match "Empty") {
     exit 1
 }
 
+Write-Host "============================================================"
+Write-Host " RUN: ocl_test_enhance  (findMax + enhanceBrightness pipeline)"
+Write-Host " NOT ocl_test_findmax   (that one is findmax-only)"
+Write-Host "============================================================"
+
 & $Hdc shell "mkdir -p $RemoteDir"
 & $Hdc file send $Exe "$RemoteDir/ocl_test_enhance"
 foreach ($k in $Kernels) {

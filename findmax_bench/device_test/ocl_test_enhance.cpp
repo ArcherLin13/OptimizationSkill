@@ -330,17 +330,25 @@ int main(int argc, char** argv) {
         }
     };
 
-    std::printf("=== findMax + enhanceBrightness: 2-kernel vs fused ===\n");
+    std::printf("##############################################################\n");
+    std::printf("# PIPELINE: findMaxValue + enhanceBrightness (NOT findmax-only)\n");
+    std::printf("#   enhance: divisor=fmin(1,max);  src[i] *= 1/divisor\n");
+    std::printf("#   A) baseline = 2 kernels (orig findmax THEN enhance)\n");
+    std::printf("#   B) fused    = 1 kernel  (findMaxAndEnhance)\n");
+    std::printf("##############################################################\n");
     std::printf("device: %s\n", deviceName(device).c_str());
     std::printf("size:   %d x %d  ref_max=%.4f  divisor=fmin(1,max)=%.4f\n", W, H, ref_max,
                 std::min(1.0f, ref_max));
-    std::printf("base:   findmax(%s) + enhance(%s)  gws=(%zu,%zu) lws=(%zu,%zu)\n",
-                args.findmax_path.c_str(), args.enhance_path.c_str(), gws2[0], gws2[1], lws2[0],
-                lws2[1]);
-    std::printf("fused:  %s  gws=%zu lws=%zu nwg=%d\n\n", args.fused_path.c_str(), gws1, lws1,
-                args.nwg);
+    std::printf("\n[A] baseline 2-kernel path:\n");
+    std::printf("    1) findMaxValue     <- %s\n", args.findmax_path.c_str());
+    std::printf("    2) enhanceBrightness<- %s\n", args.enhance_path.c_str());
+    std::printf("    launch 2D gws=(%zu,%zu) lws=(%zu,%zu)\n", gws2[0], gws2[1], lws2[0], lws2[1]);
+    std::printf("\n[B] fused 1-kernel path:\n");
+    std::printf("    1) findMaxAndEnhance <- %s\n", args.fused_path.c_str());
+    std::printf("    launch 1D gws=%zu lws=%zu nwg=%d\n\n", gws1, lws1, args.nwg);
 
     // Correctness
+    std::printf("--- correctness (full image after enhance vs CPU) ---\n");
     uploadSrc();
     resetMax();
     {
@@ -354,7 +362,7 @@ int main(int argc, char** argv) {
         OCL_CHECK(clWaitForEvents(1, &e1), "en wait");
         clReleaseEvent(e1);
     }
-    checkOut("baseline_2k");
+    checkOut("A_baseline findmax+enhance");
 
     uploadSrc();
     resetMax();
@@ -366,7 +374,8 @@ int main(int argc, char** argv) {
         OCL_CHECK(clWaitForEvents(1, &e), "fu wait");
         clReleaseEvent(e);
     }
-    checkOut("fused_1k");
+    checkOut("B_fused    findMaxAndEnhance");
+    std::printf("\n");
 
     auto benchBaseline = [&](int warmup, int runs) {
         for (int i = 0; i < warmup; ++i) {
@@ -435,13 +444,15 @@ int main(int argc, char** argv) {
     const auto [fu_ms, fu_best] = benchFused(args.warmup, args.runs);
     const double base_avg = fm_ms + en_ms;
 
-    std::printf("\n--- kernel time only (avg %d runs; H2D restore not in kernel profile) ---\n",
-                args.runs);
-    std::printf("  baseline findmax:   %.3f ms\n", fm_ms);
-    std::printf("  baseline enhance:   %.3f ms\n", en_ms);
-    std::printf("  baseline sum:       %.3f ms (best total %.3f)\n", base_avg, base_best);
-    std::printf("  fused 1-kernel:     %.3f ms (best %.3f)\n", fu_ms, fu_best);
-    std::printf("  baseline/fused:     %.2fx\n", base_avg / std::max(fu_ms, 1e-9));
+    std::printf("\n--- PIPELINE kernel time (avg %d runs) ---\n", args.runs);
+    std::printf("  [A] findMaxValue (orig)     %.3f ms\n", fm_ms);
+    std::printf("  [A] enhanceBrightness       %.3f ms\n", en_ms);
+    std::printf("  [A] TOTAL 2-kernel           %.3f ms  (best %.3f)\n", base_avg, base_best);
+    std::printf("  [B] findMaxAndEnhance fused %.3f ms  (best %.3f)\n", fu_ms, fu_best);
+    std::printf("  speedup [A]/[B]:            %.2fx\n", base_avg / std::max(fu_ms, 1e-9));
+    std::printf("##############################################################\n");
+    std::printf("# end PIPELINE bench (findmax + enhance)\n");
+    std::printf("##############################################################\n");
 
     clReleaseMemObject(buf_src);
     clReleaseMemObject(buf_max);

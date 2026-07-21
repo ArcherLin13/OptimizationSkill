@@ -39,6 +39,11 @@ if ($targets -match "Empty") {
     exit 1
 }
 
+Write-Host "============================================================"
+Write-Host " RUN: ocl_test_findmax  (findMax ONLY — no enhance)"
+Write-Host " For pipeline: .\scripts\run_enhance.ps1"
+Write-Host "============================================================"
+
 & $Hdc shell "mkdir -p $RemoteDir"
 & $Hdc file send $Exe "$RemoteDir/ocl_test_findmax"
 foreach ($k in $Kernels) {
