@@ -38,7 +38,7 @@ $RootUnix = ($Root -replace '\\', '/')
 $BuildDirUnix = ($BuildDir -replace '\\', '/')
 $HeadersDirUnix = (((Split-Path $Root -Parent) + "\ocr_softmax_bench\third_party\OpenCL-Headers") -replace '\\', '/')
 
-Write-Host "Build findMaxValue OpenCL bench"
+Write-Host "Build f32_to_f16 OpenCL bench"
 Write-Host "Build: $BuildDir"
 
 & $Cmake @(
@@ -57,18 +57,11 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Push-Location $BuildDir
 try {
-    & $Ninja ocl_test_findmax ocl_test_enhance ocl_test_enhance_only ocl_test_gws_style
+    & $Ninja ocl_test_f32_to_f16
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally {
     Pop-Location
 }
 
-Write-Host "Built: $BuildDir\ocl_test_findmax"
-Write-Host "Built: $BuildDir\ocl_test_enhance"
-Write-Host "Built: $BuildDir\ocl_test_enhance_only"
-Write-Host "Built: $BuildDir\ocl_test_gws_style"
-Write-Host "Next:  .\scripts\run_device.ps1         (findmax only)"
-Write-Host "       .\scripts\run_enhance.ps1       (findmax+enhance pipeline)"
-Write-Host "       .\scripts\run_enhance_only.ps1  (enhance microbench)"
-Write-Host "       .\scripts\run_gws_style.ps1     (4K NV12->RGB launch style)"
-Write-Host "f32->f16: see ..\f32_to_f16_bench\scripts\run_device.ps1"
+Write-Host "Built: $BuildDir\ocl_test_f32_to_f16"
+Write-Host "Next:  .\scripts\run_device.ps1"

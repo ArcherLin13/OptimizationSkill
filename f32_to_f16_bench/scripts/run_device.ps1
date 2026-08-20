@@ -1,6 +1,6 @@
 param(
     [string]$OhosNative = "",
-    [string]$RemoteDir = "/data/local/tmp/findmax",
+    [string]$RemoteDir = "/data/local/tmp/f32_to_f16",
     [int]$Width = 5760,
     [int]$Height = 4320,
     [int]$Runs = 30,

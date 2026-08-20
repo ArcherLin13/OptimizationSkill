@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(findmax_bench LANGUAGES CXX)
+project(f32_to_f16_bench LANGUAGES CXX)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 set(OPENCL_HEADERS_DIR "${ROOT}/../ocr_softmax_bench/third_party/OpenCL-Headers" CACHE PATH
@@ -9,7 +9,7 @@ if(NOT EXISTS "${OPENCL_HEADERS_DIR}/CL/cl.h")
     message(FATAL_ERROR "OpenCL headers missing: ${OPENCL_HEADERS_DIR}/CL/cl.h")
 endif()
 
-function(add_findmax_ocl_test target_name src_file)
+function(add_f32_to_f16_test target_name src_file)
     add_executable(${target_name} ${src_file})
     target_compile_features(${target_name} PRIVATE cxx_std_17)
     target_include_directories(${target_name} PRIVATE "${OPENCL_HEADERS_DIR}" "${ROOT}/device_test")
@@ -26,7 +26,4 @@ function(add_findmax_ocl_test target_name src_file)
     endif()
 endfunction()
 
-add_findmax_ocl_test(ocl_test_findmax device_test/ocl_test_findmax.cpp)
-add_findmax_ocl_test(ocl_test_enhance device_test/ocl_test_enhance.cpp)
-add_findmax_ocl_test(ocl_test_enhance_only device_test/ocl_test_enhance_only.cpp)
-add_findmax_ocl_test(ocl_test_gws_style device_test/ocl_test_gws_style.cpp)
+add_f32_to_f16_test(ocl_test_f32_to_f16 device_test/ocl_test_f32_to_f16.cpp)
